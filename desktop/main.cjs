@@ -16,8 +16,13 @@ const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const RUN_VALUE = 'Mar7thClaw';
 const { execFileSync } = require('node:child_process');
 
+// 改了名的 electron.exe 会让 app.isPackaged 变成 true，但项目并没有打进 resources 目录，
+// 不带项目目录参数启动只会打开 Electron 的默认页面。所以按实际所在位置判断要不要带参数。
+const BUNDLED = __dirname.toLowerCase().startsWith(`${process.resourcesPath}${path.sep}`.toLowerCase());
+const APP_ARG = BUNDLED ? '' : `"${root}"`;
+
 function autostartCommand() {
-  return app.isPackaged ? `"${process.execPath}"` : `"${process.execPath}" "${root}"`;
+  return `"${process.execPath}" ${APP_ARG}`.trim();
 }
 
 // 自启动直接写注册表 Run 项，值名固定，不随 AppUserModelID 变化。
@@ -29,12 +34,12 @@ function autostartEnabled() {
   } catch { return false; }
 }
 
-// 自启动项还指向旧的 electron.exe 时，改成当前的启动程序（Mar7thClaw.exe）。
+// 自启动项还指向旧的 electron.exe，或者漏了项目目录参数时，改成当前的启动命令。
 function migrateAutostart() {
   if (process.platform !== 'win32' || !/Mar7thClaw\.exe$/i.test(process.execPath)) return;
   try {
     const out = execFileSync('reg', ['query', RUN_KEY, '/v', RUN_VALUE], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
-    if (/electron\.exe/i.test(out)) setAutostart(true);
+    if (/electron\.exe/i.test(out) || !out.includes(autostartCommand())) setAutostart(true);
   } catch { /* 没有开启自启动 */ }
 }
 
@@ -175,7 +180,7 @@ function applyTaskbarIcon() {
     ensureStartMenuShortcut(process.execPath);
     win.setAppDetails({
       appId: APP_ID, appIconPath: process.execPath, appIconIndex: 0, relaunchDisplayName: 'Mar7thClaw',
-      relaunchCommand: `"${process.execPath}" ${app.isPackaged ? '' : `"${root}"`}`.trim(),
+      relaunchCommand: `"${process.execPath}" ${APP_ARG}`.trim(),
     });
     desktopLog('[icon] 程序 ID', APP_ID, '启动程序', process.execPath);
   } catch (error) {
@@ -189,7 +194,7 @@ const startMenuLink = path.join(process.env.APPDATA || '', 'Microsoft', 'Windows
 function ensureStartMenuShortcut(iconPath) {
   if (process.platform !== 'win32' || !process.env.APPDATA) return;
   const wanted = {
-    target: process.execPath, args: app.isPackaged ? '' : `"${root}"`, cwd: root,
+    target: process.execPath, args: APP_ARG, cwd: root,
     icon: iconPath, iconIndex: 0, appUserModelId: APP_ID, description: 'Mar7thClaw · 三月七',
   };
   try {
