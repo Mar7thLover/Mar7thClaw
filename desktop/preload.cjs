@@ -6,6 +6,6 @@ contextBridge.exposeInMainWorld('clawDesktop', {
   hide: () => ipcRenderer.invoke('claw:hide'),
   openInBrowser: () => ipcRenderer.invoke('claw:open-browser'),
   avatarChanged: cardId => ipcRenderer.invoke('claw:avatar', String(cardId)),
-  attention: () => ipcRenderer.invoke('claw:attention'),
+  attention: notify => ipcRenderer.invoke('claw:attention', notify !== false),
   notify: (title, body) => ipcRenderer.invoke('claw:notify', title, body),
 });

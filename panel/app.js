@@ -41,6 +41,8 @@
     return node;
   };
 
+  const notificationsOn = () => state.config?.desktop?.notifications !== false;
+
   const TOOL_LABELS = { ToolSearch: '加载工具', mcp__claw__schedule_create: '登记定时任务', mcp__claw__schedule_list: '查看定时任务', mcp__claw__schedule_update: '修改定时任务', mcp__claw__schedule_delete: '删除定时任务', Bash: '运行命令', PowerShell: '运行命令', Read: '读取文件', Write: '写入文件', Edit: '修改文件', MultiEdit: '修改文件', Glob: '查找文件', Grep: '搜索内容', WebFetch: '读取网页', WebSearch: '上网搜索', Task: '派出帮手', Agent: '派出帮手', TodoWrite: '整理待办', NotebookEdit: '修改笔记本' };
   const toolDetail = input => {
     if (!input || typeof input !== 'object') return '';
@@ -295,7 +297,7 @@
       renderSessions();
       return;
     }
-    if (e.type === 'permission_open') { state.permissions.set(e.request.requestId, { sessionId: id, request: e.request, expiresAt: e.expiresAt }); renderPermissions(); if (desktop) desktop.attention(); return; }
+    if (e.type === 'permission_open') { state.permissions.set(e.request.requestId, { sessionId: id, request: e.request, expiresAt: e.expiresAt }); renderPermissions(); if (desktop) desktop.attention(notificationsOn()); return; }
     if (e.type === 'permission_closed') { state.permissions.delete(e.requestId); renderPermissions(); return; }
     let live = state.live.get(id);
     if (e.type === 'turn_start') { state.live.set(id, { text: '', thinking: '', tools: [], activated: [] }); }
@@ -313,7 +315,7 @@
           e.entry.activated = live.activated;
           state.live.delete(id);
           const s = state.sessions.find(x => x.id === id);
-          if (desktop && !document.hasFocus()) desktop.notify(`三月七 · ${s?.title || '任务'}`, (e.entry.text || e.entry.error || '完成了').replace(/[`*#>]/g, '').slice(0, 120));
+          if (desktop && notificationsOn() && !document.hasFocus()) desktop.notify(`三月七 · ${s?.title || '任务'}`, (e.entry.text || e.entry.error || '完成了').replace(/[`*#>]/g, '').slice(0, 120));
         }
         if (id === state.current) state.transcript.push(e.entry);
         break;
@@ -474,7 +476,7 @@
     if (run.phase !== 'end') return;
     const text = `定时任务「${run.job.title}」${run.ok ? '完成' : '失败'}`;
     toast(text);
-    if (desktop) desktop.notify(`⏰ ${run.job.title}`, (run.job.lastResult?.text || text).replace(/[`*#>]/g, '').slice(0, 120));
+    if (desktop && notificationsOn()) desktop.notify(`⏰ ${run.job.title}`, (run.job.lastResult?.text || text).replace(/[`*#>]/g, '').slice(0, 120));
   }
 
   // 把 cron 反解回界面上的选项；认不出的归为自定义。
@@ -617,6 +619,7 @@
     $('pf-cwd').value = c.agent.cwd;
     $('pf-mode').value = c.agent.permissionMode;
     fillModelSelect($('pf-model'), c.agent.model || '');
+    $('pf-notify').checked = c.desktop?.notifications !== false;
     $('pf-session-note').value = currentSession()?.authorNote || '';
     $('pf-session-note').disabled = !currentSession();
     showTab('card');
@@ -713,6 +716,7 @@
         user: { name: $('pf-user-name').value, persona: $('pf-persona').value },
         prompt: { authorNote: $('pf-author-note').value, authorNoteDepth: Number($('pf-an-depth').value || 0), mainPrompt: $('pf-main').value, worldInfoScanDepth: Number($('pf-scan').value || 4), worldInfoBudgetChars: Number($('pf-budget').value || 6000) },
         agent: { cwd: $('pf-cwd').value, permissionMode: $('pf-mode').value, model: $('pf-model').value },
+        desktop: { notifications: $('pf-notify').checked },
       });
       const s = currentSession();
       if (s) await api('PATCH', `/api/sessions/${s.id}`, { authorNote: $('pf-session-note').value });

@@ -160,6 +160,7 @@ export function createServer({ config, sessions, cards, discord, models, schedul
           }
         }
       }
+      if (body.desktop && body.desktop.notifications !== undefined) patch.desktop = { notifications: body.desktop.notifications === true };
       if (body.discord) {
         const d = body.discord;
         patch.discord = {};

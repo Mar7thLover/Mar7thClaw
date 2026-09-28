@@ -375,10 +375,11 @@ ipcMain.handle('claw:is-pinned', () => prefs.pinned !== false);
 ipcMain.handle('claw:hide', () => win?.hide());
 ipcMain.handle('claw:avatar', (event, cardId) => refreshIcons(cardId));
 ipcMain.handle('claw:open-browser', () => shell.openExternal(`${baseUrl}/`));
-ipcMain.handle('claw:attention', () => {
+ipcMain.handle('claw:attention', (event, notify = true) => {
   if (win && !win.isFocused()) {
+    // 任务栏按钮始终闪烁提示；系统通知由面板设置决定。
     win.flashFrame(true);
-    if (Notification.isSupported()) {
+    if (notify && Notification.isSupported()) {
       const n = new Notification({ title: '三月七需要你确认', body: '有一个操作在等你审批，点这里打开面板。', icon: icon(48) });
       n.on('click', () => { win.show(); win.focus(); });
       n.show();

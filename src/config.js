@@ -26,6 +26,10 @@ export const DEFAULTS = {
     approvalTimeoutSec: 600,
     disallowedTools: ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'],
   },
+  desktop: {
+    // 回复完成、定时任务完成、需要审批时是否弹 Windows 系统通知（面板内提示不受影响）。
+    notifications: true,
+  },
   prompt: {
     mainPrompt: '',
     authorNote: '',
