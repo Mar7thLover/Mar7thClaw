@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mar7thClaw</title>
+<meta name="claw-token" content="__CLAW_TOKEN__">
+<link rel="stylesheet" href="/panel/style.css">
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <button class="icon-btn" id="toggle-sidebar" title="会话列表" aria-label="会话列表">☰</button>
+    <div class="avatar" id="avatar" aria-hidden="true"><img id="avatar-img" alt="" hidden><span>七</span></div>
+    <div class="who">
+      <div class="who-name" id="char-name">三月七</div>
+      <div class="who-status"><span class="dot" id="core-dot"></span><span id="core-text">连接中…</span><span class="sep">·</span><span class="dot" id="discord-dot"></span><span id="discord-text">Discord</span></div>
+    </div>
+    <div class="topbar-actions">
+      <button class="icon-btn desktop-only" id="expand-btn" title="在浏览器中打开面板" aria-label="在浏览器中打开面板">⤢</button>
+      <button class="icon-btn desktop-only" id="pin-btn" title="窗口置顶" aria-label="窗口置顶">📌</button>
+      <button class="icon-btn" id="settings-btn" title="设置" aria-label="设置">⚙</button>
+      <button class="icon-btn desktop-only" id="hide-btn" title="收起到托盘" aria-label="收起到托盘">—</button>
+    </div>
+  </header>
+
+  <div class="body">
+    <aside class="sidebar" id="sidebar">
+      <button class="primary wide" id="new-session-btn">＋ 新委托</button>
+      <div class="session-group-title">面板</div>
+      <ul class="session-list" id="panel-sessions"></ul>
+      <div class="session-group-title">Discord</div>
+      <ul class="session-list" id="discord-sessions"></ul>
+      <div class="session-group-title with-action">定时任务<button class="icon-btn small" id="new-schedule-btn" title="新建定时任务" aria-label="新建定时任务">＋</button></div>
+      <ul class="session-list" id="schedule-list"></ul>
+    </aside>
+
+    <main class="chat">
+      <div class="session-bar" id="session-bar">
+        <div class="session-title" id="session-title">—</div>
+        <div class="session-meta" id="session-meta"></div>
+      </div>
+      <div class="messages" id="messages" aria-live="polite"></div>
+      <div class="permissions" id="permissions"></div>
+      <form class="composer" id="composer">
+        <div class="composer-options">
+          <label>模型 <select id="opt-model"><option value="">默认</option></select></label>
+          <button type="button" class="icon-btn small" id="models-refresh" title="重新读取 Claude Code 的模型列表">↻</button>
+          <label>强度 <select id="opt-effort">
+            <option value="">默认</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option>
+          </select></label>
+          <label>权限 <select id="opt-mode">
+            <option value="auto">auto（自动判断）</option><option value="default">default（逐项确认）</option><option value="acceptEdits">acceptEdits</option><option value="plan">plan（只规划）</option><option value="bypassPermissions">bypass（全部放行）</option>
+          </select></label>
+        </div>
+        <div class="attach-tray hidden" id="attach-tray"></div>
+        <div class="composer-row">
+          <button type="button" class="icon-btn attach-btn" id="attach-btn" title="添加图片（也可以直接粘贴或拖进来）" aria-label="添加图片"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M21 11.5 12.6 19.9a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <input type="file" id="attach-input" accept="image/*" multiple hidden>
+          <textarea id="input" rows="1" placeholder="和三月七说点什么，或者交给她一个任务…（Enter 发送，Shift+Enter 换行，可粘贴图片）"></textarea>
+          <button type="submit" class="primary" id="send-btn">发送</button>
+          <button type="button" class="danger hidden" id="stop-btn">停止</button>
+        </div>
+        <div class="composer-note hidden" id="composer-note"></div>
+      </form>
+    </main>
+  </div>
+</div>
+
+<dialog id="new-session-dialog">
+  <form method="dialog" class="dialog-body">
+    <h2>新委托</h2>
+    <label>标题（可留空，会用第一句话）<input id="ns-title" placeholder="新的委托"></label>
+    <label>工作目录<input id="ns-cwd"></label>
+    <p class="hint">Claude Code 会话与工作目录绑定；要在别的项目里干活，新建会话时改这里即可。</p>
+    <div class="dialog-actions"><button value="cancel">取消</button><button value="ok" class="primary">开始</button></div>
+  </form>
+</dialog>
+
+<dialog id="schedule-dialog">
+  <form method="dialog" class="dialog-body" id="schedule-form">
+    <h2 id="sc-heading">新建定时任务</h2>
+    <label>标题<input id="sc-title" placeholder="例如：早上提醒看邮件" maxlength="60" required></label>
+    <label>到点时让三月七做什么<textarea id="sc-prompt" rows="3" placeholder="写成完整的指令，例如：检查 D:\Projects 下所有仓库有没有未提交的改动，汇总告诉我" required></textarea></label>
+    <div class="row">
+      <label class="grow">时间规则
+        <select id="sc-kind">
+          <option value="daily">每天</option><option value="weekdays">工作日（周一至周五）</option><option value="weekly">每周几</option>
+          <option value="interval">每隔一段时间</option><option value="once">只运行一次</option><option value="cron">自定义 cron</option>
+        </select>
+      </label>
+      <label class="grow sc-field" data-kinds="daily weekdays weekly">时间<input type="time" id="sc-time" value="09:00"></label>
+      <label class="grow sc-field" data-kinds="interval">间隔（分钟，至少 5）<input type="number" id="sc-minutes" min="5" value="60"></label>
+      <label class="grow sc-field" data-kinds="once">日期时间<input type="datetime-local" id="sc-at"></label>
+      <label class="grow sc-field" data-kinds="cron">cron（分 时 日 月 周）<input id="sc-cron" placeholder="0 9 * * *"></label>
+    </div>
+    <div class="weekday-picks sc-field" data-kinds="weekly" id="sc-weekdays"></div>
+    <label>在哪个会话里运行<select id="sc-session"></select></label>
+    <p class="hint">在 Discord 会话里运行的任务，结果会发回那个频道或私信；其他情况在面板里弹通知。</p>
+    <label class="inline-check"><input type="checkbox" id="sc-enabled" checked> 启用</label>
+    <div class="hint" id="sc-status"></div>
+    <div class="dialog-actions">
+      <button type="button" class="danger hidden" id="sc-delete">删除</button>
+      <button type="button" class="hidden" id="sc-run">立即运行</button>
+      <span class="grow"></span>
+      <button value="cancel" formnovalidate>取消</button>
+      <button value="ok" class="primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="settings-dialog">
+  <div class="dialog-body settings">
+    <div class="settings-head">
+      <h2>设置</h2>
+      <button class="icon-btn" id="settings-close" aria-label="关闭">✕</button>
+    </div>
+    <nav class="tabs" id="settings-tabs">
+      <button data-tab="card" class="active">角色卡</button>
+      <button data-tab="lore">世界书</button>
+      <button data-tab="prompt">提示词</button>
+      <button data-tab="inspect">预览</button>
+      <button data-tab="discord">Discord</button>
+      <button data-tab="guest">访客</button>
+      <button data-tab="people">人物</button>
+    </nav>
+
+    <section data-panel="card">
+      <div class="row">
+        <label class="grow">当前角色卡 <select id="card-select"></select></label>
+        <button id="card-activate">设为默认</button>
+      </div>
+      <div class="row">
+        <label class="file-btn">导入 PNG / JSON<input type="file" id="card-import" accept=".png,.json" hidden></label>
+        <button id="card-export">导出 JSON</button>
+      </div>
+      <label>名字<input id="cf-name"></label>
+      <label>描述 description<textarea id="cf-description" rows="6"></textarea></label>
+      <label>性格 personality<textarea id="cf-personality" rows="4"></textarea></label>
+      <label>场景 scenario<textarea id="cf-scenario" rows="3"></textarea></label>
+      <label>开场白 first_mes<textarea id="cf-first_mes" rows="4"></textarea></label>
+      <label>示例对话 mes_example（用 &lt;START&gt; 分段）<textarea id="cf-mes_example" rows="6"></textarea></label>
+      <label>主提示覆盖 system_prompt（留空用默认，可写 {{original}}）<textarea id="cf-system_prompt" rows="2"></textarea></label>
+      <label>后置指令 post_history_instructions<textarea id="cf-post_history_instructions" rows="3"></textarea></label>
+      <label>深度提示 depth_prompt<textarea id="cf-depth_prompt" rows="2"></textarea></label>
+      <label>深度提示的深度<input id="cf-depth" type="number" min="0" max="100"></label>
+      <div class="dialog-actions"><button class="primary" id="card-save">保存角色卡</button></div>
+    </section>
+
+    <section data-panel="lore" hidden>
+      <p class="hint">关键词命中时注入本轮；「常驻」条目进入 system 层（可被缓存）。关键词用逗号分隔，/正则/ 也可以。</p>
+      <div id="lore-list"></div>
+      <div class="dialog-actions"><button id="lore-add">＋ 新条目</button><button class="primary" id="lore-save">保存世界书</button></div>
+    </section>
+
+    <section data-panel="prompt" hidden>
+      <label>你的称呼 {{user}}（面板会话）<input id="pf-user-name"></label>
+      <label>你的 Persona（让她了解你）<textarea id="pf-persona" rows="3"></textarea></label>
+      <label>全局作者注释 Author's Note（每轮注入）<textarea id="pf-author-note" rows="3"></textarea></label>
+      <label>作者注释深度（0 = 放在消息之后，≥1 = 放在消息之前）<input id="pf-an-depth" type="number" min="0" max="100"></label>
+      <label>主提示 Main Prompt（留空用内置默认）<textarea id="pf-main" rows="3"></textarea></label>
+      <div class="row">
+        <label class="grow">世界书扫描深度<input id="pf-scan" type="number" min="1" max="100"></label>
+        <label class="grow">世界书预算（字符）<input id="pf-budget" type="number" min="0" max="100000"></label>
+      </div>
+      <label>默认工作目录<input id="pf-cwd"></label>
+      <label>新会话默认模型 <select id="pf-model"><option value="">默认</option></select></label>
+      <label>新会话默认权限模式 <select id="pf-mode">
+        <option value="auto">auto</option><option value="default">default</option><option value="acceptEdits">acceptEdits</option><option value="plan">plan</option><option value="bypassPermissions">bypassPermissions</option>
+      </select></label>
+      <label>当前会话的作者注释（覆盖全局）<textarea id="pf-session-note" rows="2"></textarea></label>
+      <div class="dialog-actions"><button class="primary" id="prompt-save">保存</button></div>
+    </section>
+
+    <section data-panel="inspect" hidden>
+      <div class="row"><input class="grow" id="inspect-text" placeholder="输入一条示例消息，查看本轮实际发给 Claude Code 的提示词"><button id="inspect-run">预览</button></div>
+      <h3>system 层（追加在 Claude Code 默认系统提示之后）</h3>
+      <pre class="inspect" id="inspect-system"></pre>
+      <h3>本轮注入层（作为用户消息发送）</h3>
+      <pre class="inspect" id="inspect-turn"></pre>
+      <div class="hint" id="inspect-lore"></div>
+    </section>
+
+    <section data-panel="discord" hidden>
+      <div id="discord-info" class="hint"></div>
+      <p class="hint">令牌与白名单保存在 data/config.json，可运行 <code>npm run import-openclaw</code> 从 OpenClaw 重新导入。</p>
+      <label class="inline-check"><input type="checkbox" id="dc-reactions"> 允许她用表情反应（回复里写 [[react:😀]]）</label>
+      <div class="dialog-actions"><button id="discord-restart">重新连接</button><button class="primary" id="discord-save">保存</button></div>
+    </section>
+
+    <section data-panel="guest" hidden>
+      <p class="hint">访客 = Discord 上不在「主人」名单里的人。他们只能聊天（可选上网搜索），不能碰这台电脑，也读不到你的记忆。</p>
+      <div class="row">
+        <label class="grow">访客使用的模型<select id="gs-model"></select></label>
+        <label class="grow">强度<select id="gs-effort"></select></label>
+      </div>
+      <label class="inline-check"><input type="checkbox" id="gs-websearch"> 允许访客让她上网搜索（WebSearch，唯一开放的工具）</label>
+      <div class="row">
+        <label class="grow">每人可用次数<input type="number" id="gs-limit" min="0" max="100000"></label>
+        <label class="grow">统计周期<select id="gs-period"><option value="day">每天</option><option value="week">每周</option><option value="month">每月</option><option value="total">总共</option></select></label>
+      </div>
+      <h3>哪些身份组可以以访客身份使用</h3>
+      <p class="hint">在服务器原有的 users / roles 名单之外追加；仍然需要 @ 她或叫她名字。</p>
+      <div id="gs-roles" class="role-picks"></div>
+      <h3>访客用量</h3>
+      <div id="gs-usage" class="usage-table"></div>
+      <div class="dialog-actions"><button class="primary" id="guest-save">保存访客设置</button></div>
+    </section>
+
+    <section data-panel="people" hidden>
+      <p class="hint">她会观察已配置服务器里所有人的发言（包括不在白名单里的人），每人攒够一定条数后用下面的模型在后台整理成档案。聊天时，当前发言者、被 @ 的人、频道记录里出现的人和正文里提到名字的人，他们的档案会被激活注入。所有数据只存在本机 data/people/。</p>
+      <div class="row">
+        <label class="inline-check grow"><input type="checkbox" id="pm-enabled"> 启用人物记忆</label>
+        <label class="grow">整理用的模型<select id="pm-model"></select></label>
+      </div>
+      <div class="row">
+        <label class="grow">每攒多少条发言整理一次<input type="number" id="pm-every" min="3" max="200"></label>
+        <label class="grow">每轮最多激活几个人<input type="number" id="pm-max" min="0" max="20"></label>
+      </div>
+      <div class="dialog-actions"><button class="primary" id="pm-save">保存设置</button></div>
+      <input id="pm-search" placeholder="搜索名字、用户名或档案内容">
+      <div id="pm-list" class="people-list"></div>
+    </section>
+  </div>
+</dialog>
+
+<div class="lightbox hidden" id="lightbox" role="dialog" aria-label="查看图片"><img id="lightbox-img" alt=""></div>
+<div class="toast hidden" id="toast" role="status"></div>
+<script src="/panel/markdown.js"></script>
+<script src="/panel/select.js"></script>
+<script src="/panel/app.js"></script>
+</body>
+</html>

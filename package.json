@@ -1,0 +1,34 @@
+{
+  "name": "mar7thclaw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "三月七人设的本机 Claw：常驻面板 + Discord bot，直接驱动本机 Claude Code 完成任务",
+  "license": "MIT",
+  "author": "Mar7thLover",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Mar7thLover/Mar7thClaw.git"
+  },
+  "homepage": "https://github.com/Mar7thLover/Mar7thClaw#readme",
+  "main": "desktop/main.cjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "panel": "electron .",
+    "test": "node --test test/*.test.js",
+    "doctor": "node scripts/doctor.js",
+    "import-openclaw": "node scripts/import-openclaw.js",
+    "preview": "node scripts/preview-prompt.js",
+    "models:check": "node scripts/check-models.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "electron": "^44.4.5"
+  }
+}

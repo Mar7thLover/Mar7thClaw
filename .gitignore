@@ -1,0 +1,10 @@
+node_modules/
+# 运行时数据：含 Discord 令牌、会话记录、人物记忆、上传图片等，绝不能提交。
+data/
+*.log
+# 工作目录由 Claude Code 在运行时使用。
+workspace/*
+!workspace/.gitkeep
+.claw-attachments/
+# 角色头像是 HoYoverse 的版权美术，不随仓库分发；自行放置同名 PNG 即可。
+cards/*.png
