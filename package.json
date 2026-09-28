@@ -22,13 +22,16 @@
     "doctor": "node scripts/doctor.js",
     "import-openclaw": "node scripts/import-openclaw.js",
     "preview": "node scripts/preview-prompt.js",
-    "models:check": "node scripts/check-models.js"
+    "models:check": "node scripts/check-models.js",
+    "build-launcher": "node scripts/build-launcher.js",
+    "postinstall": "node scripts/build-launcher.js"
   },
   "dependencies": {
     "discord.js": "^14.27.0",
     "sharp": "^0.35.5"
   },
   "devDependencies": {
-    "electron": "^44.4.5"
+    "electron": "^44.4.5",
+    "rcedit": "^5.0.2"
   }
 }

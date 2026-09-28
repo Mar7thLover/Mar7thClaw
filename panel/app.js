@@ -598,6 +598,7 @@
     if (name === 'inspect') runInspect();
     if (name === 'discord') renderDiscordInfo();
     if (name === 'guest') loadGuest();
+    if (name === 'access') loadAccess();
     if (name === 'people') loadPeople();
   }
   for (const b of document.querySelectorAll('#settings-tabs button')) b.addEventListener('click', () => showTab(b.dataset.tab));
@@ -747,6 +748,100 @@
       el('div', {}, `令牌：${c.token || '未配置'} · 主人 ${c.owners?.length || 0} 人 · 白名单 ${c.allowFrom?.length || 0} 人`),
       el('div', {}, `私信策略 ${c.dmPolicy} · 群组策略 ${c.groupPolicy} · 历史 ${c.historyLimit} 条 · 提及词 ${(c.mentionPatterns || []).join(' / ')}`));
   }
+  // ---------------- 白名单 ----------------
+  const nameCache = new Map();
+  async function resolveNames(ids) {
+    const missing = ids.filter(id => !nameCache.has(id));
+    if (missing.length) {
+      try { for (const u of await api('GET', `/api/discord/users?ids=${missing.join(',')}`)) nameCache.set(u.id, u); } catch { /* Discord 未连接时只显示 ID */ }
+    }
+  }
+  const parseId = text => (/(\d{15,25})/.exec(String(text || '')) || [])[1] || null;
+
+  // 可编辑的 ID 列表：显示头像和名字，支持添加与移除。
+  function idListEditor(container, ids, { protectLast = false } = {}) {
+    const list = [...ids];
+    const render = () => {
+      container.replaceChildren(...list.map((id, index) => {
+        const u = nameCache.get(id);
+        return el('div', { class: 'id-row' },
+          u?.avatar ? el('img', { src: u.avatar, alt: '' }) : el('img', { alt: '' }),
+          u?.name ? el('span', { class: 'id-name' }, u.name, u.username && u.username !== u.name ? el('span', { class: 'hint' }, ` @${u.username}`) : null) : el('span', { class: 'id-unknown' }, '（查不到这个用户）'),
+          el('span', { class: 'id-raw' }, id),
+          el('button', { type: 'button', title: '移除', 'aria-label': `移除 ${u?.name || id}`, onclick: () => {
+            if (protectLast && list.length === 1) { toast('至少保留一位主人'); return; }
+            list.splice(index, 1); render();
+          } }, '✕'));
+      }), (() => {
+        const input = el('input', { placeholder: '粘贴用户 ID 或 <@提及>' });
+        const add = async () => {
+          const id = parseId(input.value);
+          if (!id) { toast('没认出用户 ID'); return; }
+          if (list.includes(id)) { toast('已经在名单里了'); return; }
+          await resolveNames([id]);
+          list.push(id);
+          render();
+        };
+        input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); add(); } });
+        return el('div', { class: 'id-add' }, input, el('button', { type: 'button', onclick: add }, '添加'));
+      })());
+    };
+    render();
+    return { get: () => [...list] };
+  }
+
+  let accessEditors = null;
+  async function loadAccess() {
+    const d = state.config.discord;
+    const guilds = await api('GET', '/api/discord/guilds').catch(() => []);
+    const configured = d.guilds || {};
+    const allUserIds = [...new Set([...d.owners, ...d.allowFrom, ...Object.values(configured).flatMap(g => g.users || [])].map(String))];
+    await resolveNames(allUserIds);
+    $('ac-dm-policy').value = d.dmPolicy;
+    $('ac-group-policy').value = d.groupPolicy;
+    const owners = idListEditor($('ac-owners'), d.owners.map(String), { protectLast: true });
+    const allow = idListEditor($('ac-allow'), d.allowFrom.map(String));
+    // bot 所在的服务器 + 配置里有但 bot 不在的服务器，都列出来。
+    const ids = [...new Set([...guilds.map(g => g.id), ...Object.keys(configured).filter(id => id !== '*')])];
+    const cards = ids.map(gid => {
+      const info = guilds.find(g => g.id === gid);
+      const cfg = configured[gid];
+      const enabled = el('input', { type: 'checkbox', checked: Boolean(cfg) && cfg.enabled !== false });
+      const mention = el('input', { type: 'checkbox', checked: cfg ? cfg.requireMention !== false : true });
+      const others = el('input', { type: 'checkbox', checked: cfg ? cfg.ignoreOtherMentions === true : true });
+      const usersBox = el('div', { class: 'id-list' });
+      const users = idListEditor(usersBox, (cfg?.users || []).map(String));
+      const selectedRoles = new Set((cfg?.roles || []).map(String));
+      const roleBox = info?.roles?.length ? el('div', { class: 'role-chips' }, info.roles.map(role => el('label', { class: 'role-chip' },
+        el('input', { type: 'checkbox', value: role.id, checked: selectedRoles.has(role.id) }),
+        el('span', { class: 'role-dot', style: `background:${role.color === '#000000' ? 'var(--muted)' : role.color}` }), role.name))) : el('p', { class: 'hint' }, info ? '没有可选的身份组' : 'bot 不在这个服务器里，无法读取身份组');
+      const card = el('div', { class: `guild-card${enabled.checked ? '' : ' off'}` },
+        el('label', { class: 'guild-head inline-check' }, enabled, info?.name || `服务器 ${gid}`, el('span', { class: 'hint' }, gid)),
+        el('div', { class: 'guild-flags' },
+          el('label', { class: 'inline-check' }, mention, '需要 @ 她或叫她名字才回复'),
+          el('label', { class: 'inline-check' }, others, '@ 了别人的消息不理会')),
+        el('div', { class: 'hint' }, '谁能跟她说话（用户和身份组都不填 = 服务器里所有人；主人始终可以）'),
+        usersBox, roleBox);
+      enabled.addEventListener('change', () => card.classList.toggle('off', !enabled.checked));
+      return { gid, card, read: () => enabled.checked ? { requireMention: mention.checked, ignoreOtherMentions: others.checked, users: users.get(), roles: [...card.querySelectorAll('.role-chip input:checked')].map(i => i.value) } : null };
+    });
+    $('ac-guilds').replaceChildren(...(cards.length ? cards.map(c => c.card) : [el('p', { class: 'hint' }, 'Discord 未连接，也没有已配置的服务器。')]));
+    accessEditors = { owners, allow, cards };
+  }
+
+  $('access-save').addEventListener('click', async () => {
+    if (!accessEditors) return;
+    const guilds = {};
+    for (const c of accessEditors.cards) { const value = c.read(); if (value) guilds[c.gid] = value; }
+    const users = Object.values(guilds);
+    if (users.some(g => !g.users.length && !g.roles.length) && !confirm('有服务器的用户和身份组都没填，这意味着服务器里所有人都能跟她说话（按访客对待，受访客次数限制）。确定吗？')) return;
+    try {
+      const discord = await api('PUT', '/api/discord/access', { owners: accessEditors.owners.get(), allowFrom: accessEditors.allow.get(), dmPolicy: $('ac-dm-policy').value, groupPolicy: $('ac-group-policy').value, guilds });
+      state.config.discord = discord;
+      toast('白名单已保存，立即生效');
+    } catch (error) { toast(error.message); }
+  });
+
   // ---------------- 访客 ----------------
   function fillEffortInto(select, modelId, current) {
     const levels = effortsFor(modelId);
@@ -877,6 +972,6 @@
   });
 
   for (const id of ['opt-model', 'opt-effort', 'opt-mode']) window.enhanceSelect($(id));
-  for (const id of ['card-select', 'pf-model', 'pf-mode', 'sc-kind', 'sc-session', 'gs-model', 'gs-effort', 'gs-period', 'pm-model']) window.enhanceSelect($(id), { block: true });
+  for (const id of ['card-select', 'pf-model', 'pf-mode', 'sc-kind', 'sc-session', 'gs-model', 'gs-effort', 'gs-period', 'pm-model', 'ac-dm-policy', 'ac-group-policy']) window.enhanceSelect($(id), { block: true });
   connect();
 })();

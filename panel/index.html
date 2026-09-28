@@ -121,6 +121,7 @@
       <button data-tab="prompt">提示词</button>
       <button data-tab="inspect">预览</button>
       <button data-tab="discord">Discord</button>
+      <button data-tab="access">白名单</button>
       <button data-tab="guest">访客</button>
       <button data-tab="people">人物</button>
     </nav>
@@ -187,6 +188,23 @@
       <p class="hint">令牌与白名单保存在 data/config.json，可运行 <code>npm run import-openclaw</code> 从 OpenClaw 重新导入。</p>
       <label class="inline-check"><input type="checkbox" id="dc-reactions"> 允许她用表情反应（回复里写 [[react:😀]]）</label>
       <div class="dialog-actions"><button id="discord-restart">重新连接</button><button class="primary" id="discord-save">保存</button></div>
+    </section>
+
+    <section data-panel="access" hidden>
+      <p class="hint">填 Discord 用户 ID（开发者模式下右键头像 → 复制用户 ID），也可以直接粘贴 &lt;@123…&gt; 这样的提及。访客身份组在「访客」页设置。</p>
+      <h3>主人（完整工具权限，可以让她操作这台电脑）</h3>
+      <div class="id-list" id="ac-owners"></div>
+      <h3>私信</h3>
+      <div class="row">
+        <label class="grow">私信策略<select id="ac-dm-policy"><option value="allowlist">只允许下面名单里的人和主人</option><option value="open">所有人都能私信（按访客对待）</option><option value="disabled">关闭私信</option></select></label>
+      </div>
+      <div class="id-list" id="ac-allow"></div>
+      <h3>服务器</h3>
+      <div class="row">
+        <label class="grow">群组策略<select id="ac-group-policy"><option value="allowlist">只在下面启用的服务器里工作</option><option value="open">所有服务器（不推荐）</option><option value="disabled">关闭群聊</option></select></label>
+      </div>
+      <div id="ac-guilds" class="guild-access"></div>
+      <div class="dialog-actions"><button class="primary" id="access-save">保存白名单</button></div>
     </section>
 
     <section data-panel="guest" hidden>

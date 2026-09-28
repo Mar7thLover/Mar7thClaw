@@ -97,6 +97,44 @@ export function createServer({ config, sessions, cards, discord, models, schedul
       return { ok: true };
     }],
     ['GET', /^\/api\/discord\/guilds$/, async () => discord?.guildsInfo?.() || []],
+    ['GET', /^\/api\/discord\/users$/, async (req, match, url) => {
+      const ids = (url.searchParams.get('ids') || '').split(',').filter(id => /^\d{5,25}$/.test(id)).slice(0, 100);
+      return discord?.resolveUsers?.(ids) || ids.map(id => ({ id, name: null }));
+    }],
+    ['PUT', /^\/api\/discord\/access$/, async (req) => {
+      const body = await readBody(req);
+      const idList = (value, name) => {
+        if (!Array.isArray(value) || value.some(id => !/^\d{5,25}$/.test(String(id)))) throw new HttpError(400, `${name} 里有不合法的 ID`);
+        return [...new Set(value.map(String))];
+      };
+      const owners = idList(body.owners, '主人');
+      // 主人为空时，启动时会被 allowFrom 顶替，容易误会，所以直接拒绝。
+      if (!owners.length) throw new HttpError(400, '至少保留一位主人');
+      const allowFrom = idList(body.allowFrom, '私信白名单');
+      const policies = ['allowlist', 'open', 'disabled'];
+      if (!policies.includes(body.dmPolicy) || !policies.includes(body.groupPolicy)) throw new HttpError(400, '策略只能是 allowlist / open / disabled');
+      if (!body.guilds || typeof body.guilds !== 'object' || Array.isArray(body.guilds)) throw new HttpError(400, 'guilds 格式不对');
+      const guilds = {};
+      for (const [gid, g] of Object.entries(body.guilds)) {
+        if (!/^\d{5,25}$/.test(gid) && gid !== '*') throw new HttpError(400, `服务器 ID 不合法：${gid}`);
+        // 保留面板不管理的字段（例如 channels），只校验并覆盖这几个。
+        const previous = config.discord.guilds?.[gid] || {};
+        guilds[gid] = {
+          ...previous,
+          requireMention: g.requireMention !== false,
+          ignoreOtherMentions: g.ignoreOtherMentions === true,
+          users: idList(g.users || [], '用户名单'),
+          roles: idList(g.roles || [], '身份组名单'),
+        };
+        if (g.enabled === false) guilds[gid].enabled = false; else delete guilds[gid].enabled;
+      }
+      for (const [key, value] of [['owners', owners], ['allowFrom', allowFrom], ['dmPolicy', body.dmPolicy], ['groupPolicy', body.groupPolicy], ['guilds', guilds]]) {
+        replaceUserConfigValue(['discord', key], value);
+        config.discord[key] = structuredClone(value);
+      }
+      broadcast({ kind: 'state', state: state() });
+      return publicConfig(config).discord;
+    }],
     ['GET', /^\/api\/guest-usage$/, async () => guestUsage?.list() || []],
     ['POST', /^\/api\/guest-usage\/(\d+)\/reset$/, async (req, [id]) => { guestUsage.reset(id); return guestUsage.status(id); }],
     ['GET', /^\/api\/people$/, async () => people?.list() || []],

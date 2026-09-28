@@ -256,6 +256,24 @@ select:not(.cs-native) { appearance: none; -webkit-appearance: none; padding-rig
 .person-head .p-meta { font-size: 12px; color: var(--muted); }
 .person .row button { font-size: 12.5px; padding: 4px 10px; }
 
+/* ---------- 白名单 ---------- */
+.id-list { display: flex; flex-direction: column; gap: 6px; }
+.id-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 10px; background: var(--surface-2); font-size: 13px; }
+.id-row img { width: 24px; height: 24px; border-radius: 50%; flex: none; background: var(--border); }
+.id-row .id-name { font-weight: 600; }
+.id-row .id-raw { color: var(--muted); font-size: 11.5px; font-family: "Cascadia Code", Consolas, monospace; margin-left: auto; }
+.id-row .id-unknown { color: var(--warn); }
+.id-row button { border: none; background: none; color: var(--muted); padding: 2px 6px; }
+.id-row button:hover { color: var(--danger); }
+.id-add { display: flex; gap: 6px; }
+.id-add input { flex: 1; }
+.guild-access { display: flex; flex-direction: column; gap: 10px; }
+.guild-card { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.guild-card.off { opacity: .6; }
+.guild-card .guild-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.guild-card .guild-head .hint { font-weight: 400; margin-left: auto; }
+.guild-flags { display: flex; gap: 14px; flex-wrap: wrap; }
+
 /* ---------- 定时任务 ---------- */
 .session-group-title.with-action { display: flex; align-items: center; justify-content: space-between; }
 .schedule-item { flex-direction: column; align-items: stretch !important; gap: 0 !important; }

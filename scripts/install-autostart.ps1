@@ -3,7 +3,8 @@
 param([switch]$Off)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$electron = Join-Path $root 'node_modules\electron\dist\electron.exe'
+$electron = Join-Path $root 'node_modules\electron\dist\Mar7thClaw.exe'
+if (-not (Test-Path -LiteralPath $electron)) { $electron = Join-Path $root 'node_modules\electron\dist\electron.exe' }
 if (-not (Test-Path -LiteralPath $electron)) { throw "找不到 Electron：$electron，请先在 $root 运行 npm install" }
 $mode = if ($Off) { 'off' } else { 'on' }
 $output = & $electron $root --set-autostart $mode | Out-String

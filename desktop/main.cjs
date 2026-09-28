@@ -6,9 +6,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
-// 任务栏分组用的 AppUserModelID。资源管理器会按这个 ID 缓存图标路径，所以它和图标文件路径都必须保持不变。
-// （早期版本用过「Mar7thClaw」「Mar7thClaw.Panel」，缓存里指向了已删除或无法解析的图标，因此换成这个新 ID。）
-const APP_ID = 'Mar7thClaw.Desktop';
+// 任务栏图标的解析链：程序 ID → 开始菜单同 ID 快捷方式 → 快捷方式指向的可执行文件的图标，结果会被资源管理器缓存。
+// 所以只在用带头像图标的启动程序 Mar7thClaw.exe 运行时才声明程序 ID、维护快捷方式；
+// 退回 electron.exe 运行时一概不碰，免得把 Electron 的图标写进缓存。
+// 早期用过的「Mar7thClaw」「Mar7thClaw.Panel」「Mar7thClaw.Desktop」缓存里都已是 Electron 图标，不要再用。
+const APP_ID = 'Mar7thClaw.App';
+const LAUNCHER_MODE = process.platform === 'win32' && /Mar7thClaw\.exe$/i.test(process.execPath);
 const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const RUN_VALUE = 'Mar7thClaw';
 const { execFileSync } = require('node:child_process');
@@ -24,6 +27,15 @@ function autostartEnabled() {
     const out = execFileSync('reg', ['query', RUN_KEY, '/v', RUN_VALUE], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
     return out.includes(autostartCommand());
   } catch { return false; }
+}
+
+// 自启动项还指向旧的 electron.exe 时，改成当前的启动程序（Mar7thClaw.exe）。
+function migrateAutostart() {
+  if (process.platform !== 'win32' || !/Mar7thClaw\.exe$/i.test(process.execPath)) return;
+  try {
+    const out = execFileSync('reg', ['query', RUN_KEY, '/v', RUN_VALUE], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    if (/electron\.exe/i.test(out)) setAutostart(true);
+  } catch { /* 没有开启自启动 */ }
 }
 
 function setAutostart(enable) {
@@ -47,7 +59,7 @@ const baseUrl = `http://127.0.0.1:${port}`;
 // 供安装脚本调用：electron . --set-autostart on|off，设置登录项后立即退出。
 const autostartFlag = process.argv.indexOf('--set-autostart');
 if (autostartFlag >= 0) {
-  app.setAppUserModelId(APP_ID);
+  if (LAUNCHER_MODE) app.setAppUserModelId(APP_ID);
   app.whenReady().then(() => {
     setAutostart(process.argv[autostartFlag + 1] !== 'off');
     const now = autostartEnabled();
@@ -59,7 +71,7 @@ if (autostartFlag >= 0) {
   app.quit();
   process.exit(0);
 }
-app.setAppUserModelId(APP_ID);
+if (LAUNCHER_MODE) app.setAppUserModelId(APP_ID);
 
 let win = null;
 let tray = null;
@@ -110,11 +122,8 @@ function avatarPath(cardId) {
   return null;
 }
 
-let avatarSource = '';
 function loadAvatar(cardId) {
   const file = avatarPath(cardId);
-  // 按头像内容计算签名：内容不变就不重写图标文件。
-  avatarSource = file ? require('node:crypto').createHash('sha1').update(fs.readFileSync(file)).digest('hex') : 'gradient';
   const image = file ? nativeImage.createFromPath(file) : null;
   avatarImage = image && !image.isEmpty() ? image : null;
 }
@@ -146,85 +155,32 @@ function icon(base) {
   return result;
 }
 
-// 生成多尺寸 .ico：Windows 只稳定支持 256×256 的 PNG 条目，更小的尺寸必须是 DIB（BGRA + AND 掩码），
-// 否则资源管理器读不出来，任务栏会退回 electron.exe 的图标。
-// 任务栏按钮归属于 AppUserModelID 分组，所以还要用 setAppDetails 指明这个图标文件。
-const icoFile = path.join(dataDir, 'app-icon.ico');
-
-function iconBitmap(size) {
-  const image = avatarImage ? circle(avatarImage, size) : makeIcon(size);
-  return Buffer.from(image.resize({ width: size, height: size, quality: 'best' }).toBitmap());
-}
-
-function dibEntry(size) {
-  const bgra = iconBitmap(size);
-  const maskStride = Math.ceil(size / 32) * 4;
-  const header = Buffer.alloc(40);
-  header.writeUInt32LE(40, 0);
-  header.writeInt32LE(size, 4);
-  header.writeInt32LE(size * 2, 8); // 高度包含 AND 掩码
-  header.writeUInt16LE(1, 12);
-  header.writeUInt16LE(32, 14);
-  header.writeUInt32LE(size * size * 4 + maskStride * size, 20);
-  const pixels = Buffer.alloc(size * size * 4);
-  for (let y = 0; y < size; y++) {
-    const src = y * size * 4;
-    const dst = (size - 1 - y) * size * 4; // DIB 自下而上
-    for (let x = 0; x < size * 4; x += 4) {
-      const a = bgra[src + x + 3];
-      // Chromium 位图是预乘 alpha，ICO 需要直通 alpha。
-      for (let c = 0; c < 3; c++) pixels[dst + x + c] = a ? Math.min(255, Math.round(bgra[src + x + c] * 255 / a)) : 0;
-      pixels[dst + x + 3] = a;
-    }
-  }
-  return Buffer.concat([header, pixels, Buffer.alloc(maskStride * size)]);
-}
-
-function writeIco() {
-  // 路径固定且从不删除：资源管理器缓存的是路径，文件消失就会退回 electron.exe 的图标。
-  const signatureFile = `${icoFile}.source`;
-  const current = fs.existsSync(signatureFile) ? fs.readFileSync(signatureFile, 'utf8') : '';
-  if (current === `v2:${avatarSource}` && fs.existsSync(icoFile)) return icoFile;
-  const sizes = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256];
-  const images = sizes.map(size => size >= 256
-    ? (avatarImage ? circle(avatarImage, size) : makeIcon(size)).toPNG()
-    : dibEntry(size));
-  const header = Buffer.alloc(6 + 16 * sizes.length);
-  header.writeUInt16LE(0, 0);
-  header.writeUInt16LE(1, 2);
-  header.writeUInt16LE(sizes.length, 4);
-  let offset = header.length;
-  sizes.forEach((size, i) => {
-    const entry = 6 + 16 * i;
-    header.writeUInt8(size >= 256 ? 0 : size, entry);
-    header.writeUInt8(size >= 256 ? 0 : size, entry + 1);
-    header.writeUInt16LE(1, entry + 4);
-    header.writeUInt16LE(32, entry + 6);
-    header.writeUInt32LE(images[i].length, entry + 8);
-    header.writeUInt32LE(offset, entry + 12);
-    offset += images[i].length;
-  });
-  fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(`${icoFile}.tmp`, Buffer.concat([header, ...images]));
-  fs.renameSync(`${icoFile}.tmp`, icoFile);
-  fs.writeFileSync(signatureFile, `v2:${avatarSource}`);
-  // 清理早期版本按时间戳命名的图标文件。
-  for (const old of fs.readdirSync(dataDir)) {
-    if (/^app-icon-\d+\.ico$/.test(old)) fs.rmSync(path.join(dataDir, old), { force: true });
-  }
-  return icoFile;
+function desktopLog(...parts) {
+  try {
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, 'desktop.log'), `${new Date().toISOString()} ${parts.join(' ')}\n`);
+  } catch { /* 日志失败不影响界面 */ }
 }
 
 function applyTaskbarIcon() {
   if (!win || process.platform !== 'win32') return;
-  const file = writeIco();
-  ensureStartMenuShortcut(file);
-  // 窗口图标直接用内存里的多分辨率图像（最可靠）；ico 文件给任务栏分组与固定到任务栏用。
-  win.setIcon(icon(32));
-  win.setAppDetails({
-    appId: APP_ID, appIconPath: file, appIconIndex: 0, relaunchDisplayName: 'Mar7thClaw',
-    relaunchCommand: `"${process.execPath}" ${app.isPackaged ? '' : `"${root}"`}`.trim(),
-  });
+  try {
+    // 窗口图标直接用内存里的多分辨率图像，随头像实时更新。
+    win.setIcon(icon(32));
+    if (!LAUNCHER_MODE) {
+      desktopLog('[icon] 以 electron.exe 运行：不声明程序 ID，也不改开始菜单快捷方式（运行 npm run build-launcher 生成 Mar7thClaw.exe）');
+      return;
+    }
+    // 快捷方式和重启图标都直接指向带头像图标的 Mar7thClaw.exe。
+    ensureStartMenuShortcut(process.execPath);
+    win.setAppDetails({
+      appId: APP_ID, appIconPath: process.execPath, appIconIndex: 0, relaunchDisplayName: 'Mar7thClaw',
+      relaunchCommand: `"${process.execPath}" ${app.isPackaged ? '' : `"${root}"`}`.trim(),
+    });
+    desktopLog('[icon] 程序 ID', APP_ID, '启动程序', process.execPath);
+  } catch (error) {
+    desktopLog('[icon] 设置任务栏图标失败：', error.stack || error.message);
+  }
 }
 
 // Windows 10/11 的任务栏按 AppUserModelID 分组，并从「开始」菜单里同 ID 的快捷方式读取图标；
@@ -399,6 +355,7 @@ app.on('before-quit', () => { quitting = true; savePrefs(); });
 app.on('window-all-closed', () => { /* 托盘常驻，不随窗口退出 */ });
 
 if (autostartFlag < 0) app.whenReady().then(async () => {
+  migrateAutostart();
   loadAvatar();
   tray = new Tray(icon(16));
   tray.setToolTip('Mar7thClaw · 三月七');

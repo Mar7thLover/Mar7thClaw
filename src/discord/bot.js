@@ -408,6 +408,17 @@ ${body}`);
     for (const chunk of chunks) await channel.send({ content: chunk, allowedMentions: { users: job.notifyUserId ? [job.notifyUserId] : [] } });
   }
 
+  // 面板白名单页用：把用户 ID 解析成 Discord 名字（查不到的标记为未知）。
+  async resolveUsers(ids) {
+    if (!this.client?.isReady()) return ids.map(id => ({ id, name: null }));
+    return Promise.all(ids.map(async id => {
+      try {
+        const user = await this.client.users.fetch(id);
+        return { id, name: user.globalName || user.username, username: user.username, avatar: user.displayAvatarURL({ size: 64 }), bot: user.bot };
+      } catch { return { id, name: null }; }
+    }));
+  }
+
   guildsInfo() {
     if (!this.client?.isReady()) return [];
     return [...this.client.guilds.cache.values()].map(guild => ({
