@@ -8,7 +8,7 @@ import {
 } from 'discord.js';
 import { chunkMessage } from './chunk.js';
 import { compileMentionPatterns, evaluateMessage, stripBotMention, inConfiguredGuild } from './gating.js';
-import { extractReactions, stripReactionTags } from './reactions.js';
+import { extractReactions, extractStickers, resolveStickers, stripReactionTags } from './reactions.js';
 import { ingestImages, looksLikeImage, MAX_IMAGES } from '../images.js';
 import { ingestFiles, guessKind, formatSize, uploadPath, MAX_FILES, MAX_GUEST_TEXT_BYTES, MAX_PDF_BYTES } from '../attachments.js';
 
@@ -214,7 +214,7 @@ export class DiscordBot extends EventEmitter {
         notes.push(`<图片已保存：${file}>`);
       }
     }
-    for (const sticker of message.stickers?.values?.() || []) notes.push(`<贴纸:${sticker.name}>`);
+    for (const sticker of message.stickers?.values?.() || []) notes.push(`<贴纸:${sticker.name}${sticker.description ? `（${sticker.description}）` : ''}>`);
     const { images, notes: imageNotes } = await ingestImages(this.dataDir, meta.id, imageItems);
     const { files, documents, notes: fileNotes } = await ingestFiles(this.dataDir, meta.id, fileItems, { saveDir: owner ? ownerDir : null, prefix: message.id });
     if (referenced && [...images, ...files].some(item => (item.label || item.name).startsWith('被回复消息'))) notes.push('<部分附件来自被回复的那条消息>');
@@ -288,7 +288,15 @@ export class DiscordBot extends EventEmitter {
       const emojis = [...guild.emojis.cache.values()].filter(e => e.available !== false).slice(0, 30);
       extras.emojis = emojis.map(e => `:${e.name}: → ${e.toString()}`).join('\n');
     }
+    // 贴纸只能用当前服务器自己的（bot 没有 Nitro，不能跨服务器用，私信里也没有服务器贴纸）。
+    const stickers = this.availableStickers(guild);
+    if (stickers.length) extras.stickers = stickers.slice(0, 40).map(s => `${s.name}${s.description ? ` — ${s.description}` : ''}${s.tags ? `（${s.tags}）` : ''}`).join('\n');
     return extras;
+  }
+
+  availableStickers(guild) {
+    if (!guild || this.cfg.stickers === false) return [];
+    return [...(guild.stickers?.cache?.values?.() || [])].filter(s => s.available !== false);
   }
 
   async runAndReply(message, meta, payload, interaction = null) {
@@ -342,14 +350,17 @@ export class DiscordBot extends EventEmitter {
       clearTimeout(editTimer);
     }
     const extracted = extractReactions((result.entry?.text || result.text || '').trim());
-    let finalText = extracted.text;
+    const stickerTags = extractStickers(extracted.text);
+    let finalText = stickerTags.text;
     if (message && this.cfg.reactions !== false) {
       for (const emoji of extracted.reactions) await message.react(emoji).catch(error => this.log(`[discord] 表情反应失败 ${emoji}：${error.message}`));
     }
+    const { ids: stickerIds, missing } = resolveStickers(stickerTags.stickers, this.availableStickers(channel?.guild));
+    if (missing.length) this.log(`[discord] 找不到贴纸：${missing.join('、')}`);
     const { attachments, skipped } = this.outgoingAttachments(channel, result.files || []);
     if (skipped.length) finalText = `${finalText}\n-# 📎 ${skipped.join('；')}`.trim();
     // 只有表情没有文字：不发消息，删掉预览即可。
-    if (result.ok && !finalText && !attachments.length && extracted.reactions.length && !interaction) {
+    if (result.ok && !finalText && !attachments.length && !stickerIds.length && extracted.reactions.length && !interaction) {
       if (preview) await preview.delete().catch(() => {});
       return;
     }
@@ -358,9 +369,10 @@ export class DiscordBot extends EventEmitter {
       finalText = finalText ? `${finalText}\n\n-# ${reason}` : `呜…${reason}`;
     }
     const chunks = chunkMessage(finalText);
-    if (!chunks.length) chunks.push(attachments.length ? '📎' : '……');
+    // 只发贴纸时正文可以为空。
+    if (!chunks.length) chunks.push(attachments.length ? '📎' : stickerIds.length ? '' : '……');
     const last = chunks.length - 1;
-    // 文件附在最后一块上；带附件发送失败（比如超过服务器上限）时退回只发文字并说明。
+    // 文件和贴纸附在最后一块上；带附件发送失败（比如超过服务器上限）时退回只发文字并说明。
     const withFiles = async (send, content, index, extra = {}) => {
       if (index !== last || !attachments.length) return send({ content, ...extra });
       try { return await send({ content, files: attachments, ...extra }); } catch (error) {
@@ -368,20 +380,31 @@ export class DiscordBot extends EventEmitter {
         return send({ content: `${content}\n-# 📎 附件发送失败（${error.message.slice(0, 120)}），可以在面板里下载`.slice(0, 2000), ...extra });
       }
     };
+    // 贴纸发送失败（被删掉、权限不足）时去掉贴纸重发，不能让正文也丢掉。
+    const withExtras = async (send, content, index, extra = {}) => {
+      if (index !== last || !stickerIds.length) return withFiles(send, content, index, extra);
+      try { return await withFiles(send, content, index, { ...extra, stickers: stickerIds }); } catch (error) {
+        this.log(`[discord] 发送贴纸失败：${error.message}`);
+        if (!content && !attachments.length) return null;
+        return withFiles(send, content, index, extra);
+      }
+    };
     if (interaction) {
-      await withFiles(payload => interaction.editReply(payload), chunks[0], 0, { allowedMentions: { parse: ['users'] } }).catch(() => channel?.send(chunks[0]));
+      // 交互回复（webhook）不能带贴纸，贴纸单独发到频道里。
+      await withFiles(payload => interaction.editReply(payload), chunks[0] || '👇', 0, { allowedMentions: { parse: ['users'] } }).catch(() => channel?.send(chunks[0] || '……'));
       for (const [index, chunk] of chunks.entries()) if (index > 0) await withFiles(payload => interaction.followUp(payload), chunk, index, { allowedMentions: { parse: ['users'] } }).catch(() => {});
+      if (stickerIds.length && channel) await channel.send({ stickers: stickerIds }).catch(error => this.log(`[discord] 发送贴纸失败：${error.message}`));
       return;
     }
-    // 单块、不含提及、也没有附件时直接把预览改成最终回复；否则删掉预览重新发送（编辑不会触发提及通知）。
-    if (preview && chunks.length === 1 && !attachments.length && !/<@[!&]?\d+>/.test(chunks[0])) {
+    // 单块、不含提及、也没有附件或贴纸时直接把预览改成最终回复；否则删掉预览重新发送（编辑不会触发提及通知，也加不了贴纸）。
+    if (preview && chunks.length === 1 && !attachments.length && !stickerIds.length && !/<@[!&]?\d+>/.test(chunks[0])) {
       await preview.edit({ content: chunks[0], allowedMentions: { parse: ['users'] } }).catch(() => {});
       return;
     }
     if (preview) await preview.delete().catch(() => {});
     for (const [index, chunk] of chunks.entries()) {
-      if (index === 0) await withFiles(payload => message.reply(payload), chunk, index, { allowedMentions: { parse: ['users'], repliedUser: false } }).catch(() => channel.send(chunk));
-      else await withFiles(payload => channel.send(payload), chunk, index, { allowedMentions: { parse: ['users'] } });
+      if (index === 0) await withExtras(payload => message.reply(payload), chunk, index, { allowedMentions: { parse: ['users'], repliedUser: false } }).catch(() => chunk && channel.send(chunk));
+      else await withExtras(payload => channel.send(payload), chunk, index, { allowedMentions: { parse: ['users'] } });
     }
   }
 

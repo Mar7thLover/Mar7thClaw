@@ -776,6 +776,7 @@
     const d = state.discord || {};
     const c = state.config?.discord || {};
     $('dc-reactions').checked = c.reactions !== false;
+    $('dc-stickers').checked = c.stickers !== false;
     $('discord-info').replaceChildren(
       el('div', {}, `状态：${d.state}${d.user ? ` · ${d.user.tag}` : ''}${d.guilds ? ` · ${d.guilds} 个服务器` : ''}`),
       d.error ? el('div', { style: 'color: var(--danger)' }, d.error) : null,
@@ -998,7 +999,7 @@
   });
 
   $('discord-save').addEventListener('click', async () => {
-    try { state.config = await api('PUT', '/api/config', { discord: { reactions: $('dc-reactions').checked } }); toast('已保存'); } catch (error) { toast(error.message); }
+    try { state.config = await api('PUT', '/api/config', { discord: { reactions: $('dc-reactions').checked, stickers: $('dc-stickers').checked } }); toast('已保存'); } catch (error) { toast(error.message); }
   });
 
   $('discord-restart').addEventListener('click', async () => {

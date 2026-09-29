@@ -226,6 +226,7 @@ export function createServer({ config, sessions, cards, discord, models, schedul
         const d = body.discord;
         patch.discord = {};
         if (d.reactions !== undefined) patch.discord.reactions = d.reactions === true;
+        if (d.stickers !== undefined) patch.discord.stickers = d.stickers === true;
         if (d.guest) {
           const g = d.guest;
           const guest = {};

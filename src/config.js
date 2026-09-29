@@ -51,6 +51,8 @@ export const DEFAULTS = {
     streamPreview: true,
     // 允许她在回复里用 [[react:😀]] 给触发消息加表情反应。
     reactions: true,
+    // 允许她用 [[sticker:名字]] 发当前服务器的贴纸。
+    stickers: true,
     guest: {
       model: 'sonnet',
       effort: '',

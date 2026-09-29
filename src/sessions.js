@@ -238,7 +238,7 @@ export class SessionManager extends EventEmitter {
       channelHistory: message.channelHistory || '', replyTo: message.replyTo || null,
       // 面板里的主人会话也能按名字想起群里的人。
       people: message.people ?? (this.people && meta.origin === 'panel' && meta.tier === 'owner' ? this.people.activate({ text: message.text }) : ''),
-      emojis: message.emojis || '', reactions: Boolean(message.reactions),
+      emojis: message.emojis || '', reactions: Boolean(message.reactions), stickers: message.stickers || '',
       guestWebSearch: this.runtimeFor(meta).guestTools.includes('WebSearch'),
       greeting: meta.started ? '' : meta.pendingGreeting ? this.expandGreeting(meta, card, meta.pendingGreeting) : '',
     });
