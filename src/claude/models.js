@@ -3,7 +3,7 @@ import { mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
-// 仍在服务的旧版模型（Anthropic 官方停用表，2026-09-24 核对，与 ClaudeBridge 一致）。
+// 仍在服务的旧版模型（Anthropic 官方停用表，2026-09-24 核对，与 ClaudeBridge 一致；Sonnet 5 于 2026-09-29 被 5.5 取代后补入）。
 // CLI 菜单只列最新模型，这些需要手动补充；能否在当前账号使用以 data/model-checks.json 的实测为准。
 export const LEGACY_MODELS = [
   ['claude-fable-5', 'Fable 5'],
@@ -12,6 +12,7 @@ export const LEGACY_MODELS = [
   ['claude-opus-4-7', 'Opus 4.7'],
   ['claude-opus-4-6', 'Opus 4.6'],
   ['claude-opus-4-5-20251101', 'Opus 4.5'],
+  ['claude-sonnet-5', 'Sonnet 5'],
   ['claude-sonnet-4-6', 'Sonnet 4.6'],
   ['claude-sonnet-4-5-20250929', 'Sonnet 4.5'],
 ];
@@ -20,7 +21,7 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const FALLBACK_MENU = [
   { value: 'default', resolvedModel: 'claude-opus-5-5[1m]', displayName: 'Default (Opus 5.5)' },
   { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5' },
-  { value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet 5' },
+  { value: 'sonnet', resolvedModel: 'claude-sonnet-5-5', displayName: 'Sonnet 5.5' },
   { value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001', displayName: 'Haiku 4.5' },
   { value: 'fable', resolvedModel: 'claude-fable-5-1', displayName: 'Fable 5.1' },
 ];

@@ -91,12 +91,14 @@ Discord (src/discord/) ───────────────┤
 
 - **当前账号菜单**：CLI 菜单原样列出，如 `default`、`opus`、Fable、`sonnet`、`haiku`。
 - **别名**：`opus[1m]`、`sonnet[1m]`、`fable`、`fable[1m]`、`best`，始终指向该系列的最新版本。
-- **完整模型 ID**：如 `claude-opus-5-5`、`claude-sonnet-5[1m]`，用于固定版本。
-- **旧版模型**：CLI 菜单不会列出，但官方仍在服务，共 8 个：Fable 5、Opus 5、Opus 4.8/4.7/4.6/4.5、Sonnet 4.6/4.5。
+- **完整模型 ID**：如 `claude-opus-5-5`、`claude-sonnet-5-5[1m]`，用于固定版本。
+- **旧版模型**：CLI 菜单不会列出，但官方仍在服务，共 9 个：Fable 5、Opus 5、Opus 4.8/4.7/4.6/4.5、Sonnet 5、Sonnet 4.6/4.5。
 
 `npm run models:check` 会对旧版模型逐个做一次真实生成（加 `--all` 则校验所有完整 ID），会消耗少量额度。结果写入 `data/model-checks.json`，列表里用标记显示：✓ 表示实测可用，≠ 表示请求被换成了别的模型，✗ 表示最近一次失败。强度下拉框只显示所选模型支持的档位；换模型时，如果原来的强度新模型不支持，会自动回到默认。
 
 2026-09-27 实测：当前版 6 个完整 ID 与 7 个旧版模型可用；`claude-fable-5` 的请求会被服务端换成 `claude-opus-5`。
+
+2026-09-29：Sonnet 更新到 5.5（`claude-sonnet-5-5`），`sonnet` 别名需要 Claude Code 2.1.284 及以上才指向它，旧版 CLI 仍解析到 Sonnet 5，并对 `claude-sonnet-5-5` 报 unrecognized_model（请求本身能成功）。访客默认模型和人物记忆整理用的都是 `sonnet`，升级 CLI（`claude update`）后自动换成 5.5。
 
 ## 定时任务
 
