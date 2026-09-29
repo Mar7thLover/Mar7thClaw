@@ -121,7 +121,7 @@
   // ---------------- 模型列表 ----------------
   const GROUPS = [['menu', '当前账号菜单'], ['alias', '别名'], ['full', '完整模型 ID'], ['legacy', '旧版模型']];
   function modelLabel(m) {
-    const mark = m.status === 'verified' ? ' ✓' : m.status === 'failed' ? ' ✗ 最近验证失败' : m.status === 'model-mismatch' ? ` ≠ 实际会换成 ${m.actualModel}` : m.group === 'legacy' ? '（未验证）' : '';
+    const mark = m.status === 'verified' ? ' ✓' : m.status === 'failed' ? ' ✗ 最近验证失败' : m.status === 'model-mismatch' ? ` ≠ 实际会换成 ${m.actualModel}` : m.status === 'refusal-fallback' ? ` ↯ 被安全防护拦下，换成 ${m.actualModel}` : m.group === 'legacy' ? '（未验证）' : '';
     return `${m.label}${mark}`;
   }
   function fillModelSelect(select, current) {
@@ -136,7 +136,7 @@
         option.dataset.label = m.label.replace(/（[^）]*）$/, '');
         const hint = m.group === 'legacy' ? m.id : m.resolvedModel !== m.id && !m.label.includes(m.resolvedModel) ? m.resolvedModel : '';
         if (hint) option.dataset.hint = hint;
-        const badge = m.status === 'verified' ? ['可用', 'ok'] : m.status === 'model-mismatch' ? [`实为 ${m.actualModel}`, 'warn'] : m.status === 'failed' ? ['失败', 'bad'] : m.group === 'legacy' ? ['未验证', ''] : null;
+        const badge = m.status === 'verified' ? ['可用', 'ok'] : m.status === 'model-mismatch' ? [`实为 ${m.actualModel}`, 'warn'] : m.status === 'refusal-fallback' ? [`被拦截 → ${m.actualModel}`, 'warn'] : m.status === 'failed' ? ['失败', 'bad'] : m.group === 'legacy' ? ['未验证', ''] : null;
         if (badge) { option.dataset.badge = badge[0]; if (badge[1]) option.dataset.tone = badge[1]; }
         return option;
       })));

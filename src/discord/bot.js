@@ -532,7 +532,7 @@ ${body}`);
 
   modelChoices(query) {
     const q = String(query || '').toLowerCase();
-    const mark = m => m.status === 'verified' ? ' ✓' : m.status === 'model-mismatch' ? ` ≠ 实际为 ${m.actualModel}` : m.status === 'failed' ? ' ✗' : '';
+    const mark = m => m.status === 'verified' ? ' ✓' : m.status === 'model-mismatch' ? ` ≠ 实际为 ${m.actualModel}` : m.status === 'refusal-fallback' ? ` ↯ 被安全防护拦下，换成 ${m.actualModel}` : m.status === 'failed' ? ' ✗' : '';
     return (this.models?.state.models || [])
       .filter(m => !q || m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q))
       .slice(0, 25)
@@ -542,11 +542,11 @@ ${body}`);
   modelListText() {
     const groups = [['menu', '当前账号菜单'], ['alias', '别名'], ['full', '完整模型 ID'], ['legacy', '旧版模型']];
     const models = this.models?.state.models || [];
-    const mark = m => m.status === 'verified' ? ' ✓' : m.status === 'model-mismatch' ? ` ≠ 实际为 ${m.actualModel}` : m.status === 'failed' ? ' ✗' : '';
+    const mark = m => m.status === 'verified' ? ' ✓' : m.status === 'model-mismatch' ? ` ≠ 实际为 ${m.actualModel}` : m.status === 'refusal-fallback' ? ` ↯ 被安全防护拦下，换成 ${m.actualModel}` : m.status === 'failed' ? ' ✗' : '';
     return groups.map(([group, title]) => {
       const items = models.filter(m => m.group === group);
       return items.length ? `**${title}**\n${items.map(m => `\`${m.id}\`${mark(m)}`).join('、')}` : '';
-    }).filter(Boolean).join('\n') + '\n-# ✓ = 已在本账号实测可用；≠ = 请求会被替换成其他模型';
+    }).filter(Boolean).join('\n') + '\n-# ✓ = 已在本账号实测可用；≠ = 请求会被替换成其他模型；↯ = 被安全防护拦下后换成其他模型';
   }
 
   async onInteraction(interaction) {

@@ -28,6 +28,7 @@ rl.on('close', () => process.exit(0));
 
 async function run(prompt) {
   out({ type: 'system', subtype: 'init', session_id: sessionId, model: 'fake-model', cwd: process.cwd(), permissionMode: args[args.indexOf('--permission-mode') + 1] });
+  if (mode === 'refusal') out({ type: 'system', subtype: 'model_refusal_fallback', trigger: 'refusal', original_model: 'claude-fable-5', fallback_model: 'claude-opus-4-8', api_refusal_category: 'cyber' });
   out({ type: 'stream_event', event: { type: 'message_start' } });
   const text = Array.isArray(prompt) ? prompt.filter(b => b.type === 'text').map(b => b.text).join('') : prompt;
   const imageCount = Array.isArray(prompt) ? prompt.filter(b => b.type === 'image' && b.source?.data).length : 0;

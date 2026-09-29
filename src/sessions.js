@@ -314,6 +314,7 @@ export class SessionManager extends EventEmitter {
       if (event.type === 'tool_use') tools.set(event.id, { id: event.id, name: event.name, input: event.input });
       if (event.type === 'tool_result' && tools.has(event.id)) Object.assign(tools.get(event.id), { result: event.text.slice(0, 1500), isError: event.isError });
       if (event.type === 'init' && !meta.started) { meta.started = true; meta.pendingGreeting = ''; this.save(meta); }
+      if (event.type === 'model_fallback') this.append(id, { kind: 'notice', text: `${event.from || '所选模型'} 的安全防护拦下了这次回复${event.category ? `（${event.category}）` : ''}，Claude Code 已自动换用 ${event.to || '其他模型'} 重试。` });
       emit(event);
     };
     this.outbox.set(id, []);

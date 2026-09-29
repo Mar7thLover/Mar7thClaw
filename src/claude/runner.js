@@ -142,7 +142,10 @@ export async function runTurn(turn, { claudeBin, tmpDir, signal, onEvent = () =>
         continue;
       }
       if (item.parent_tool_use_id) continue; // 子代理内部过程不展示
-      if (item.type === 'system' && item.subtype === 'init') {
+      if (item.type === 'system' && item.subtype === 'model_refusal_fallback') {
+        // 安全防护拦下了回复，Claude Code 换模型重试；把原因告诉前端，而不是悄悄换掉。
+        onEvent({ type: 'model_fallback', from: item.original_model || '', to: item.fallback_model || '', category: item.api_refusal_category || '' });
+      } else if (item.type === 'system' && item.subtype === 'init') {
         started = true;
         onEvent({ type: 'init', claudeSessionId: item.session_id, model: item.model, cwd: item.cwd, permissionMode: item.permissionMode });
       } else if (item.type === 'stream_event') {

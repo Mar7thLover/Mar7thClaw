@@ -24,16 +24,20 @@ function check(model) {
     mkdirSync(dir, { recursive: true });
     const env = { ...process.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' };
     delete env.CLAUDECODE;
-    const child = spawn(config.claudeBin, ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--safe-mode', '--tools', '',
+    // 不限制工具集（不加 --tools）：Fable 5 在工具集受限时会被 cyber 防护误拦并降级，检测结果会失真。
+    const child = spawn(config.claudeBin, ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--safe-mode',
       '--strict-mcp-config', '--no-session-persistence', '--disable-slash-commands'], { cwd: dir, env, windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'ignore'] });
     let actualModel = null;
     let result = null;
+    let refusal = null;
     const timer = setTimeout(() => child.kill(), 90000);
     createInterface({ input: child.stdout }).on('line', line => {
       try {
         const item = JSON.parse(line);
         if (item.type === 'assistant' && item.message?.model) actualModel = item.message.model;
         if (item.type === 'result') result = item;
+        // 安全防护拦下回复后，Claude Code 会换模型重试，并发出这条事件说明原因。
+        if (item.type === 'system' && item.subtype === 'model_refusal_fallback') refusal = { category: item.api_refusal_category || '', fallbackModel: item.fallback_model || '' };
       } catch { /* 忽略非 JSON 行 */ }
     });
     child.stdin.end('只回复 OK 两个字母。');
@@ -42,8 +46,12 @@ function check(model) {
       rmSync(dir, { recursive: true, force: true });
       const ok = result && !result.is_error && result.subtype === 'success';
       const base = model.replace(/\[1m\]$/, '');
-      const status = !ok ? 'failed' : actualModel && !actualModel.startsWith(base) ? 'model-mismatch' : 'verified';
-      resolve({ model, checkedAt: new Date().toISOString(), actualModel, status, ...(ok ? {} : { error: result?.api_error_status ? `HTTP ${result.api_error_status}` : result?.subtype || 'no result' }) });
+      const status = !ok ? 'failed' : refusal ? 'refusal-fallback' : actualModel && !actualModel.startsWith(base) ? 'model-mismatch' : 'verified';
+      resolve({
+        model, checkedAt: new Date().toISOString(), actualModel: refusal?.fallbackModel || actualModel, status,
+        ...(refusal ? { refusalCategory: refusal.category } : {}),
+        ...(ok ? {} : { error: result?.api_error_status ? `HTTP ${result.api_error_status}` : result?.subtype || 'no result' }),
+      });
     });
   });
 }
@@ -53,8 +61,9 @@ const previous = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : { c
 const checks = previous.provider === catalog.state.provider ? previous.checks.filter(c => !targets.includes(c.model)) : [];
 for (const model of targets) {
   const row = await check(model);
-  const mark = { verified: '✓', failed: '✗', 'model-mismatch': '≠' }[row.status];
-  console.log(`${mark} ${model}${row.actualModel && row.actualModel !== model ? ` → ${row.actualModel}` : ''}${row.error ? `（${row.error}）` : ''}`);
+  const mark = { verified: '✓', failed: '✗', 'model-mismatch': '≠', 'refusal-fallback': '↯' }[row.status];
+  const reason = row.status === 'refusal-fallback' ? `（安全防护拦截：${row.refusalCategory || '未说明'}）` : '';
+  console.log(`${mark} ${model}${row.actualModel && row.actualModel !== model ? ` → ${row.actualModel}` : ''}${reason}${row.error ? `（${row.error}）` : ''}`);
   checks.push(row);
 }
 writeFileSync(file, JSON.stringify({ provider: catalog.state.provider, checks }, null, 2), 'utf8');

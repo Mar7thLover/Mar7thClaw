@@ -94,9 +94,15 @@ Discord (src/discord/) ───────────────┤
 - **完整模型 ID**：如 `claude-opus-5-5`、`claude-sonnet-5-5[1m]`，用于固定版本。
 - **旧版模型**：CLI 菜单不会列出，但官方仍在服务，共 9 个：Fable 5、Opus 5、Opus 4.8/4.7/4.6/4.5、Sonnet 5、Sonnet 4.6/4.5。
 
-`npm run models:check` 会对旧版模型逐个做一次真实生成（加 `--all` 则校验所有完整 ID），会消耗少量额度。结果写入 `data/model-checks.json`，列表里用标记显示：✓ 表示实测可用，≠ 表示请求被换成了别的模型，✗ 表示最近一次失败。强度下拉框只显示所选模型支持的档位；换模型时，如果原来的强度新模型不支持，会自动回到默认。
+`npm run models:check` 会对旧版模型逐个做一次真实生成（加 `--all` 则校验所有完整 ID），会消耗少量额度。结果写入 `data/model-checks.json`，列表里用标记显示：✓ 表示实测可用，≠ 表示请求被换成了别的模型，↯ 表示回复被模型的安全防护拦下、Claude Code 换了别的模型重试，✗ 表示最近一次失败。检测不限制工具集，免得触发下面说的误拦。强度下拉框只显示所选模型支持的档位；换模型时，如果原来的强度新模型不支持，会自动回到默认。
 
-2026-09-27 实测：当前版 6 个完整 ID 与 7 个旧版模型可用。`claude-fable-5` 例外：Claude Code 照原样发出请求，但会被服务端拒绝，CLI 随即通过 server-fallback 换别的模型重试，所以回复实际来自别的模型（09-27 是 `claude-opus-5`，09-29 是 `claude-opus-4-8`，并不固定）。这不代表 Fable 5 就是 Opus 5，只说明这个账号目前没法经 Claude Code 真正用上 Fable 5。
+2026-09-29 实测：当前版完整 ID 与全部旧版模型都可用，包括 `claude-fable-5`。
+
+**Fable 5 与受限工具集**：只要用 `--tools` 限制了工具集（`--tools ""`、`--tools WebSearch`、`--tools Read` 都会），Fable 5 的安全防护就会把普通消息（连一句「你好」都算）误判为 cyber 类违规，返回 `stop_reason: "refusal"`。Claude Code 收到后会发出 `model_refusal_fallback` 事件，并换用别的模型重试（实测换成了 Opus 4.8 或 Opus 5）。默认工具集下不会发生，单独加 `--safe-mode` 或 `--strict-mcp-config` 也不会；Fable 5.1 和 Opus 5.5 不受影响。
+
+- **影响**：Claw 的访客会话限制了工具集，所以访客模型不要选 Fable 5，否则每条回复都会被拦下再换模型。主人会话使用完整工具集，不受影响。
+- **提示**：一旦发生这种降级，聊天记录里会出现一条提示，写明原模型、拦截类别和替换后的模型。
+- **更正**：之前 README 写的「Fable 5 的请求会被换成 Opus 5」是只看了一次检测结果得出的错误结论。当时的检测用的是 `--tools ""`，正好触发了这个误拦。
 
 2026-09-29：Sonnet 更新到 5.5（`claude-sonnet-5-5`），`sonnet` 别名需要 Claude Code 2.1.284 及以上才指向它，旧版 CLI 仍解析到 Sonnet 5，并对 `claude-sonnet-5-5` 报 unrecognized_model（请求本身能成功）。访客默认模型和人物记忆整理用的都是 `sonnet`，升级 CLI（`claude update`）后自动换成 5.5。
 

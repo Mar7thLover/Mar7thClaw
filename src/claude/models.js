@@ -117,7 +117,7 @@ export function buildCatalog({ rows, provider }, checks = null) {
   if (checks?.provider === provider) {
     for (const item of list) {
       const check = checks.checks?.find(c => c.model === item.id);
-      if (check) Object.assign(item, { status: check.status, checkedAt: check.checkedAt, actualModel: check.actualModel || null });
+      if (check) Object.assign(item, { status: check.status, checkedAt: check.checkedAt, actualModel: check.actualModel || null, refusalCategory: check.refusalCategory || null });
     }
   }
   return list;

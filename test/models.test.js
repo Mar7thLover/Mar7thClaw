@@ -34,6 +34,8 @@ test('模型目录：第三方提供商不补旧版模型；实测结果只在�
   assert.ok(!buildCatalog({ ...menu, provider: 'bedrock' }).some(m => m.group === 'legacy'));
   const checks = { provider: 'firstParty', checks: [{ model: 'claude-fable-5', status: 'model-mismatch', actualModel: 'claude-opus-5', checkedAt: 't' }] };
   assert.equal(buildCatalog(menu, checks).find(m => m.id === 'claude-fable-5').actualModel, 'claude-opus-5');
+  const refused = { provider: 'firstParty', checks: [{ model: 'claude-fable-5', status: 'refusal-fallback', actualModel: 'claude-opus-4-8', refusalCategory: 'cyber', checkedAt: 't' }] };
+  assert.equal(buildCatalog(menu, refused).find(m => m.id === 'claude-fable-5').refusalCategory, 'cyber');
   assert.equal(buildCatalog(menu, { ...checks, provider: 'vertex' }).find(m => m.id === 'claude-fable-5').status, undefined);
   assert.deepEqual(effortLevelsFor('claude-sonnet-4-6'), ['low', 'medium', 'high', 'max']);
   assert.deepEqual(effortLevelsFor('claude-opus-4-5-20251101'), []);
@@ -52,4 +54,22 @@ test('会话：换到不支持当前强度的模型时自动清空强度；显�
   assert.throws(() => sessions.update(meta.id, { effort: 'high' }), /haiku 支持的强度/);
   sessions.update(meta.id, { model: 'fable', effort: 'high' });
   assert.equal(sessions.get(meta.id).effort, 'high');
+});
+
+
+test('会话：安全防护拦下回复、Claude Code 换模型重试时，聊天记录里留下提示', async t => {
+  const { spawn } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const { runTurn } = await import('../src/claude/runner.js');
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const dir = mkdtempSync(path.join(tmpdir(), 'mar7thclaw-refusal-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const config = merge(DEFAULTS, { agent: { cwd: path.join(dir, 'ws') }, claudeBin: 'fake' });
+  const cards = new CardStore([path.join(here, '..', 'cards')]);
+  const sessions = new SessionManager({ config, cards, dataDir: dir, runTurn: (turn, io) => runTurn(turn, { ...io, spawnProcess: (bin, args, options) => spawn(process.execPath, [path.join(here, 'fake-claude.js'), ...args], { ...options, env: { ...options.env, FAKE_MODE: 'refusal' } }) }) });
+  const meta = sessions.create({});
+  const result = await sessions.send(meta.id, { text: '你好' });
+  assert.equal(result.ok, true);
+  const notice = sessions.transcript(meta.id).find(row => row.kind === 'notice');
+  assert.equal(notice.text, 'claude-fable-5 的安全防护拦下了这次回复（cyber），Claude Code 已自动换用 claude-opus-4-8 重试。');
 });
