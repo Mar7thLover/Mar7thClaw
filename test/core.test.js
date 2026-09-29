@@ -37,6 +37,9 @@ test('参数：主人会话使用宿主审批与追加系统提示；访客会�
   const guest = buildArgs({ ...baseTurn('x'), tier: 'guest' }, 'sys.txt');
   assert.equal(guest[guest.indexOf('--tools') + 1], '');
   assert.ok(guest.includes('--safe-mode') && guest.includes('--strict-mcp-config'));
+  // 访客会话替换掉 Claude Code 的默认系统提示，主人会话只是追加。
+  assert.equal(guest[guest.indexOf('--system-prompt-file') + 1], 'sys.txt');
+  assert.ok(!guest.includes('--append-system-prompt-file') && !owner.includes('--system-prompt-file'));
 });
 
 test('运行器：流式文本、结果与临时 system 文件清理', async t => {

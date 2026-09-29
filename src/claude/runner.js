@@ -28,7 +28,9 @@ export function buildArgs(turn, systemFile, mcpFile = null) {
   const args = [
     '-p', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages',
     '--permission-prompt-tool', 'stdio', '--permission-mode', turn.permissionMode || 'auto',
-    '--append-system-prompt-file', systemFile,
+    // 主人会话追加在 Claude Code 默认系统提示之后；访客会话整个替换掉它：访客用不到编程与工具规则，
+    // 而且 Fable 5 在"默认系统提示 + 受限工具集"下会被 cyber 防护误拦（2026-09-28 实测）。
+    turn.tier === 'guest' ? '--system-prompt-file' : '--append-system-prompt-file', systemFile,
     // 角色卡修改后立刻作用于已有会话，而不是沿用首轮快照。
     '--system-prompt-snapshot', 'off',
   ];

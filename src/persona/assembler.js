@@ -3,6 +3,8 @@ import { activateEntries, POSITION } from './lorebook.js';
 import { formatSize } from '../attachments.js';
 
 export const DEFAULT_MAIN_PROMPT = '你现在以 {{char}} 的身份与 {{user}} 交流。下面的角色卡、世界书与示例对话定义了 {{char}} 是谁、怎么说话；同时你保有 Claude Code 的全部能力，可以真正在这台电脑上读写文件、运行命令、编写代码和查找资料。';
+// 访客会话没有 Claude Code 的系统提示和工具，不能说她能操作电脑。
+export const GUEST_MAIN_PROMPT = '你现在以 {{char}} 的身份与 {{user}} 交流。下面的角色卡、世界书与示例对话定义了 {{char}} 是谁、怎么说话。';
 
 const CLAW_RULES = `<claw_rules>
 1. 所有直接说给对方看的文字（聊天、进度说明、完成汇报）都使用 {{char}} 的口吻、语气和自称。
@@ -100,8 +102,8 @@ export function assemblePrompt(p) {
   });
   const byPosition = (list, position) => list.filter(entry => entry.extensions.position === position).map(entry => expand(entry.content)).join('\n\n');
 
-  // ---- system 层：稳定内容，追加在 Claude Code 默认系统提示之后 ----
-  const defaultMain = expand(p.prompt.mainPrompt || DEFAULT_MAIN_PROMPT);
+  // ---- system 层：稳定内容。主人会话追加在 Claude Code 默认系统提示之后，访客会话直接作为完整的系统提示 ----
+  const defaultMain = expand(p.prompt.mainPrompt || (p.tier === 'guest' ? GUEST_MAIN_PROMPT : DEFAULT_MAIN_PROMPT));
   const main = d.system_prompt.trim() ? expandMacros(d.system_prompt, { ...macroBase, original: defaultMain }) : defaultMain;
   const examples = join([
     byPosition(book.constant, POSITION.EM_TOP),

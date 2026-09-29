@@ -3,7 +3,7 @@ import { mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
-// 仍在服务的旧版模型（Anthropic 官方停用表，2026-09-24 核对，与 ClaudeBridge 一致；Sonnet 5 于 2026-09-29 被 5.5 取代后补入）。
+// 仍在服务的旧版模型（Anthropic 官方停用表，2026-09-24 核对，与 ClaudeBridge 一致；Sonnet 5 于 2026-09-28 被 5.5 取代后补入）。
 // CLI 菜单只列最新模型，这些需要手动补充；能否在当前账号使用以 data/model-checks.json 的实测为准。
 export const LEGACY_MODELS = [
   ['claude-fable-5', 'Fable 5'],

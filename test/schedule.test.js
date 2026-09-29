@@ -136,7 +136,8 @@ test('提示词：主人会话说明长期记忆与定时任务用法，访客�
   const card = normalizeCard(JSON.parse(readFileSync(path.join(here, '..', 'cards', 'march7th.json'), 'utf8')));
   const base = { card, prompt: { worldInfoScanDepth: 4, worldInfoBudgetChars: 6000, worldInfoRecursion: true }, userName: 'u', persona: '', surface: 'panel', authorNote: '', recent: [], message: { from: 'u', text: 'hi', via: 'panel', time: 't' } };
   assert.match(assemblePrompt({ ...base, tier: 'owner' }).system, /schedule_create[\s\S]*长期记忆|长期记忆[\s\S]*schedule_create/);
-  assert.doesNotMatch(assemblePrompt({ ...base, tier: 'guest' }).system, /schedule_create/);
+  assert.doesNotMatch(assemblePrompt({ ...base, tier: 'guest' }).system, /schedule_create|Claude Code 的全部能力/);
+  assert.match(assemblePrompt({ ...base, tier: 'owner' }).system, /Claude Code 的全部能力/);
 });
 
 test('MCP 服务：握手、列出工具、调用时绑定会话并转发到核心接口', async t => {

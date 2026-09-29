@@ -10,7 +10,7 @@
 
 - Windows 10/11（桌面面板、托盘、开机自启和任务栏图标按 Windows 编写；核心本身是纯 Node，其他系统也能以 `npm start` 运行）
 - Node.js 22 及以上
-- 已安装并登录的 Claude Code（`claude auth login`），版本需支持 `--permission-mode auto`、`--append-system-prompt-file`、`--system-prompt-snapshot` 等参数
+- 已安装并登录的 Claude Code（`claude auth login`），版本需支持 `--permission-mode auto`、`--append-system-prompt-file`、`--system-prompt-file`、`--system-prompt-snapshot` 等参数
 - 可选：一个 Discord bot 令牌（需开启 Message Content Intent）
 
 ## 启动
@@ -66,7 +66,7 @@ Discord (src/discord/) ───────────────┤
 
 | 层 | 发送方式 | 内容 |
 | --- | --- | --- |
-| system 层 | `--append-system-prompt-file`，追加在 Claude Code 默认系统提示之后，工具能力不受影响 | 主提示 / 卡片 `system_prompt`（支持 `{{original}}`）、Claw 规则、界面规则、常驻世界书（角色前/后、示例前/后）、用户 Persona、description、personality、scenario、示例对话 |
+| system 层 | 主人会话用 `--append-system-prompt-file` 追加在 Claude Code 默认系统提示之后，工具能力不受影响；访客会话用 `--system-prompt-file` 整个替换掉默认系统提示 | 主提示 / 卡片 `system_prompt`（支持 `{{original}}`）、Claw 规则、界面规则、常驻世界书（角色前/后、示例前/后）、用户 Persona、description、personality、scenario、示例对话 |
 | 逐轮注入层 | 放在每轮的用户消息里 | 首轮开场白、关键词触发的世界书、Discord 频道记录与引用（标记为不可信）、深度提示（卡片 `depth_prompt` 与「指定深度」词条）、作者注释、实际消息、`post_history_instructions` |
 
 - 会话历史由 Claude Code 持有，所以"深度"只能相对本轮消息来定位：深度 ≥1 的放在消息之前，深度 0 的放在消息之后，后置指令永远在最后。不管会话里堆了多少工具输出，人设提醒都贴近生成位置。
@@ -96,15 +96,16 @@ Discord (src/discord/) ───────────────┤
 
 `npm run models:check` 会对旧版模型逐个做一次真实生成（加 `--all` 则校验所有完整 ID），会消耗少量额度。结果写入 `data/model-checks.json`，列表里用标记显示：✓ 表示实测可用，≠ 表示请求被换成了别的模型，↯ 表示回复被模型的安全防护拦下、Claude Code 换了别的模型重试，✗ 表示最近一次失败。检测不限制工具集，免得触发下面说的误拦。强度下拉框只显示所选模型支持的档位；换模型时，如果原来的强度新模型不支持，会自动回到默认。
 
-2026-09-29 实测：当前版完整 ID 与全部旧版模型都可用，包括 `claude-fable-5`。
+2026-09-28 实测：当前版完整 ID 与全部旧版模型都可用，包括 `claude-fable-5`。
 
 **Fable 5 与受限工具集**：只要用 `--tools` 限制了工具集（`--tools ""`、`--tools WebSearch`、`--tools Read` 都会），Fable 5 的安全防护就会把普通消息（连一句「你好」都算）误判为 cyber 类违规，返回 `stop_reason: "refusal"`。Claude Code 收到后会发出 `model_refusal_fallback` 事件，并换用别的模型重试（实测换成了 Opus 4.8 或 Opus 5）。默认工具集下不会发生，单独加 `--safe-mode` 或 `--strict-mcp-config` 也不会；Fable 5.1 和 Opus 5.5 不受影响。
 
-- **影响**：Claw 的访客会话限制了工具集，所以访客模型不要选 Fable 5，否则每条回复都会被拦下再换模型。主人会话使用完整工具集，不受影响。
+- **原因**：换掉 Claude Code 的默认系统提示（`--system-prompt`）后，即使 `--tools ""` 也不再误拦，所以触发条件是「默认系统提示 + 受限工具集」这个组合。
+- **Claw 的处理**：访客会话用 `--system-prompt-file` 直接替换默认系统提示（访客本来也用不到 Claude Code 的编程与工具规则），所以访客模型也可以选 Fable 5。主人会话使用完整工具集，不受影响。
 - **提示**：一旦发生这种降级，聊天记录里会出现一条提示，写明原模型、拦截类别和替换后的模型。
 - **更正**：之前 README 写的「Fable 5 的请求会被换成 Opus 5」是只看了一次检测结果得出的错误结论。当时的检测用的是 `--tools ""`，正好触发了这个误拦。
 
-2026-09-29：Sonnet 更新到 5.5（`claude-sonnet-5-5`），`sonnet` 别名需要 Claude Code 2.1.284 及以上才指向它，旧版 CLI 仍解析到 Sonnet 5，并对 `claude-sonnet-5-5` 报 unrecognized_model（请求本身能成功）。访客默认模型和人物记忆整理用的都是 `sonnet`，升级 CLI（`claude update`）后自动换成 5.5。
+2026-09-28：Sonnet 更新到 5.5（`claude-sonnet-5-5`），`sonnet` 别名需要 Claude Code 2.1.284 及以上才指向它，旧版 CLI 仍解析到 Sonnet 5，并对 `claude-sonnet-5-5` 报 unrecognized_model（请求本身能成功）。访客默认模型和人物记忆整理用的都是 `sonnet`，升级 CLI（`claude update`）后自动换成 5.5。
 
 ## 定时任务
 
@@ -197,7 +198,7 @@ Claude Code 自带的 Cron 工具只在常驻的交互会话里生效，而 Claw
 ### 访客策略（设置 → 访客）
 
 - **模型与强度**：单独设置，默认 sonnet，和主人会话用的模型无关。
-- **工具**：只有 WebSearch 可以开放，可以关掉。其他工具一律不给，特别是能访问内网（包括 Claw 自己的接口）的 WebFetch。访客会话以 `--safe-mode --permission-mode dontAsk` 运行，不加载本机的 CLAUDE.md、技能、MCP 和记忆。
+- **工具**：只有 WebSearch 可以开放，可以关掉。其他工具一律不给，特别是能访问内网（包括 Claw 自己的接口）的 WebFetch。访客会话以 `--safe-mode --permission-mode dontAsk` 运行，不加载本机的 CLAUDE.md、技能、MCP 和记忆，也不带 Claude Code 的默认系统提示（只发角色提示词）。
 - **次数**：每人上限可按天、周、月或总数计算，也可以给单个用户单独设上限（0 表示禁止）。用完时她回复一句提示，同一周期内之后只加 ⏳ 反应。`/status` 可以查看剩余次数。
 - **身份组**：勾选的身份组成员，可以在服务器原有的 users/roles 名单之外以访客身份使用。主人不受名单限制。
 
