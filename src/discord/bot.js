@@ -290,7 +290,7 @@ export class DiscordBot extends EventEmitter {
     }
     // 贴纸只能用当前服务器自己的（bot 没有 Nitro，不能跨服务器用，私信里也没有服务器贴纸）。
     const stickers = this.availableStickers(guild);
-    if (stickers.length) extras.stickers = stickers.slice(0, 40).map(s => `${s.name}${s.description ? ` — ${s.description}` : ''}${s.tags ? `（${s.tags}）` : ''}`).join('\n');
+    if (stickers.length) extras.stickers = stickers.slice(0, 60).map(s => `${s.name}${s.description ? ` — ${s.description}` : ''}${s.tags ? `（${s.tags}）` : ''}`).join('\n');
     return extras;
   }
 
