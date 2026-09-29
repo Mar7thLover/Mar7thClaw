@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { assemblePrompt } from './persona/assembler.js';
 import { runTurn as defaultRunTurn, RunnerError } from './claude/runner.js';
+import { fileRecord, stageOutgoing, MAX_OUTGOING_FILES } from './attachments.js';
 
 const PERMISSION_MODES = ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions', 'dontAsk', 'manual'];
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -44,6 +45,8 @@ export class SessionManager extends EventEmitter {
     this.queues = new Map();
     this.running = new Map();
     this.permissions = new Map();
+    // 本轮她用 send_file 交付的文件，回复结束时随回复一起发出。
+    this.outbox = new Map();
     this.semaphore = new Semaphore(config.agent.maxConcurrent);
     mkdirSync(this.dir, { recursive: true });
     for (const file of readdirSync(this.dir)) {
@@ -231,7 +234,7 @@ export class SessionManager extends EventEmitter {
     return assemblePrompt({
       card, prompt: this.config.prompt, userName: meta.userName, persona: meta.origin === 'panel' ? this.config.user.persona : '',
       surface: meta.surface, tier: meta.tier, authorNote: meta.authorNote, recent: this.recentTexts(meta.id, scan),
-      message: { from: message.from || meta.userName, text: message.text, via: message.via || meta.surface, time: nowText(), images: message.images?.length || 0 },
+      message: { from: message.from || meta.userName, text: message.text, via: message.via || meta.surface, time: nowText(), images: message.images?.length || 0, files: message.files || [] },
       channelHistory: message.channelHistory || '', replyTo: message.replyTo || null,
       // 面板里的主人会话也能按名字想起群里的人。
       people: message.people ?? (this.people && meta.origin === 'panel' && meta.tier === 'owner' ? this.people.activate({ text: message.text }) : ''),
@@ -252,8 +255,11 @@ export class SessionManager extends EventEmitter {
    */
   send(id, message, hooks = {}) {
     const meta = this.get(id);
-    if (!message?.text?.trim() && !message?.images?.length) throw Object.assign(new Error('消息不能为空'), { status: 400 });
-    if (!message.text?.trim()) message.text = `（发来了 ${message.images.length} 张图片）`;
+    if (!message?.text?.trim() && !message?.images?.length && !message?.files?.length) throw Object.assign(new Error('消息不能为空'), { status: 400 });
+    if (!message.text?.trim()) {
+      const parts = [message.images?.length ? `${message.images.length} 张图片` : '', message.files?.length ? `${message.files.length} 个文件` : ''].filter(Boolean);
+      message.text = `（发来了 ${parts.join('和')}）`;
+    }
     return new Promise((resolve, reject) => {
       const queue = this.queues.get(id) || [];
       queue.push({ message, hooks, resolve, reject });
@@ -287,7 +293,8 @@ export class SessionManager extends EventEmitter {
     let meta = this.get(id);
     const turnId = randomUUID();
     const images = (message.images || []).map(image => ({ file: image.file, mediaType: image.mediaType, width: image.width, height: image.height }));
-    this.append(id, { kind: 'user', turnId, from: message.from || meta.userName, via: message.via || meta.surface, text: message.text, ...(images.length ? { images } : {}) });
+    const files = (message.files || []).map(fileRecord);
+    this.append(id, { kind: 'user', turnId, from: message.from || meta.userName, via: message.via || meta.surface, text: message.text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) });
     if (meta.stats.turns === 0 && meta.title === '新的委托') {
       meta.title = message.text.replace(/\s+/g, ' ').trim().slice(0, 24) || meta.title;
       this.save(meta);
@@ -309,6 +316,7 @@ export class SessionManager extends EventEmitter {
       if (event.type === 'init' && !meta.started) { meta.started = true; meta.pendingGreeting = ''; this.save(meta); }
       emit(event);
     };
+    this.outbox.set(id, []);
     emit({ type: 'turn_start' });
     try {
       let result;
@@ -322,6 +330,7 @@ export class SessionManager extends EventEmitter {
             claudeSessionId: meta.claudeSessionId, resume: meta.started, cwd: meta.cwd, system: prompt.system, prompt: prompt.turn,
             model: runtime.model, effort: runtime.effort, permissionMode: runtime.permissionMode, tier: meta.tier, guestTools: runtime.guestTools,
             images: (message.images || []).map(image => ({ mediaType: image.mediaType, data: image.data })),
+            documents: message.documents || [],
             disallowedTools: this.config.agent.disallowedTools, name: `Mar7thClaw · ${meta.title}`, mcpServers: this.mcpServersFor(meta),
           }, {
             claudeBin: this.config.claudeBin, tmpDir: this.tmpDir, signal, onEvent,
@@ -345,20 +354,45 @@ export class SessionManager extends EventEmitter {
       if (typeof result.costUsd === 'number') meta.stats.costUsd = Number((meta.stats.costUsd + result.costUsd).toFixed(6));
       this.save(meta);
       const finalText = text.trim() || result.text;
+      const outgoing = this.takeOutbox(id);
       const entry = this.append(id, {
         kind: 'assistant', turnId, text: finalText, finalText: result.text, thinking: thinking.slice(0, 20000),
         tools: [...tools.values()], ok: result.ok, interrupted: result.interrupted === true, error: result.error || '',
-        costUsd: result.costUsd ?? null, durationMs: result.durationMs ?? null,
+        costUsd: result.costUsd ?? null, durationMs: result.durationMs ?? null, ...(outgoing.length ? { files: outgoing } : {}),
       });
       emit({ type: 'turn_end', ok: result.ok, interrupted: result.interrupted === true, error: result.error || '' });
-      return { ...result, entry };
+      return { ...result, entry, files: outgoing };
     } catch (error) {
-      this.append(id, { kind: 'assistant', turnId, text: text.trim(), tools: [...tools.values()], ok: false, error: error.message });
+      const outgoing = this.takeOutbox(id);
+      this.append(id, { kind: 'assistant', turnId, text: text.trim(), tools: [...tools.values()], ok: false, error: error.message, ...(outgoing.length ? { files: outgoing } : {}) });
       emit({ type: 'turn_end', ok: false, error: error.message });
+      error.files = outgoing;
       throw error;
     } finally {
+      this.outbox.delete(id);
       this.semaphore.release();
     }
+  }
+
+  takeOutbox(id) {
+    const files = this.outbox.get(id) || [];
+    this.outbox.delete(id);
+    return files;
+  }
+
+  /**
+   * 她通过 claw 的 send_file 工具交付文件：只能在本轮进行中调用，文件随本轮回复一起发出。
+   * blocked 由核心传入（Claw 数据目录、Claude 凭据等不能外发的位置）。
+   */
+  addOutgoingFile(id, filePath, name, blocked = []) {
+    const meta = this.get(id);
+    const list = this.outbox.get(id);
+    if (!list) throw Object.assign(new Error('当前没有进行中的回复，文件无法附上'), { status: 409 });
+    if (list.length >= MAX_OUTGOING_FILES) throw Object.assign(new Error(`一次回复最多附 ${MAX_OUTGOING_FILES} 个文件`), { status: 400 });
+    const file = stageOutgoing(this.dataDir, id, meta.cwd, filePath, name, blocked);
+    list.push(file);
+    this.emitEvent(id, { type: 'file_out', file });
+    return file;
   }
 
   interrupt(id) {

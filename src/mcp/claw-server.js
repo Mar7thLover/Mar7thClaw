@@ -1,6 +1,6 @@
 // Mar7thClaw 的本地 MCP 服务（stdio，逐行 JSON-RPC）。由 Claude Code 在主人会话中启动，
-// 让模型能管理定时任务。它只调用核心的 HTTP 接口，并固定绑定到发起调用的会话：
-// 新任务的结果只会送回这个会话所在的地方，无法指定其他频道。
+// 让模型能管理定时任务、把文件作为附件发给对方。它只调用核心的 HTTP 接口，并固定绑定到发起调用的会话：
+// 新任务的结果和文件只会送回这个会话所在的地方，无法指定其他频道。
 import { createInterface } from 'node:readline';
 
 const { CLAW_URL, CLAW_TOKEN, CLAW_SESSION_ID } = process.env;
@@ -50,7 +50,23 @@ const TOOLS = [
     description: '删除定时任务。',
     inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
   },
+  {
+    name: 'send_file',
+    description: '把这台电脑上的一个文件作为附件发给对方。本轮回复结束时，文件会随回复一起送到当前会话所在的地方：Discord 频道/私信里是消息附件，桌面面板里是可下载的文件（图片直接显示）。对方要你「把文件发我」「导出一份给我」，或者你生成了图片、表格、文档、压缩包等需要交付的成果时使用。一次调用发一个文件，一轮最多 10 个；单个文件不超过 25MB（Discord 普通服务器和私信上限是 10MB，超过时对方只能在面板下载）。Claw 的数据目录、Claude 凭据和 SSH 密钥不能发送。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '文件路径，绝对路径或相对当前工作目录' },
+        name: { type: 'string', description: '可选：对方看到的文件名，默认用原文件名' },
+      },
+      required: ['path'],
+    },
+  },
 ];
+
+function size(bytes) {
+  return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.ceil(bytes / 1024))}KB`;
+}
 
 async function api(method, path, body) {
   const res = await fetch(`${CLAW_URL}${path}`, {
@@ -94,6 +110,10 @@ async function callTool(name, args = {}) {
   if (name === 'schedule_delete') {
     await api('DELETE', `/api/schedules/${encodeURIComponent(args.id)}`);
     return `已删除定时任务 ${args.id}。`;
+  }
+  if (name === 'send_file') {
+    const file = await api('POST', '/api/outbox', { path: args.path, name: args.name });
+    return `已附上「${file.name}」（${size(file.size)}），会随这次回复一起发给对方。`;
   }
   throw new Error(`未知工具：${name}`);
 }

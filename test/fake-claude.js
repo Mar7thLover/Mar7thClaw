@@ -31,7 +31,8 @@ async function run(prompt) {
   out({ type: 'stream_event', event: { type: 'message_start' } });
   const text = Array.isArray(prompt) ? prompt.filter(b => b.type === 'text').map(b => b.text).join('') : prompt;
   const imageCount = Array.isArray(prompt) ? prompt.filter(b => b.type === 'image' && b.source?.data).length : 0;
-  const echo = mode === 'images' ? `图片${imageCount}张，首块${Array.isArray(prompt) ? prompt[0].type : 'text'}` : `收到：${text.includes('<message') ? 'wrapped' : 'raw'}`;
+  const blockTypes = Array.isArray(prompt) ? prompt.map(b => b.type === 'document' ? `document:${b.title}` : b.type).join(',') : 'text';
+  const echo = mode === 'blocks' ? `块:${blockTypes}` : mode === 'images' ? `图片${imageCount}张，首块${Array.isArray(prompt) ? prompt[0].type : 'text'}` : `收到：${text.includes('<message') ? 'wrapped' : 'raw'}`;
   for (const piece of [echo.slice(0, 3), echo.slice(3)]) out({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: piece } } });
   if (mode === 'permission') {
     out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'echo hi' } }] } });

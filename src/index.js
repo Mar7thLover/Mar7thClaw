@@ -27,8 +27,8 @@ const scheduler = new Scheduler({
   sessions, dataDir, log,
   hooksFor: meta => discord.hooksFor(meta),
   // 面板总会通过事件流收到结果；Discord 会话额外把结果发回原频道/私信。
-  deliver: async ({ job, session, text, ok, error }) => {
-    if (session?.origin === 'discord') await discord.deliverSchedule(session, job, text, ok, error);
+  deliver: async ({ job, session, text, ok, error, files }) => {
+    if (session?.origin === 'discord') await discord.deliverSchedule(session, job, text, ok, error, files);
   },
 });
 const server = createServer({ config, sessions, cards, discord, models, scheduler, people, guestUsage, token, onShutdown: reason => shutdown(reason) });

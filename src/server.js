@@ -1,10 +1,12 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { timingSafeEqual } from 'node:crypto';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { root, publicConfig, saveUserConfig, replaceUserConfigValue, merge } from './config.js';
 import { cardFromBuffer } from './persona/card.js';
 import { ingestImages, MAX_IMAGES } from './images.js';
+import { ingestFiles, inlineImageType, uploadPath, MAX_FILES } from './attachments.js';
 import { dataDir as defaultDataDir } from './config.js';
 
 const panelDir = path.join(root, 'panel');
@@ -36,6 +38,12 @@ function readBody(req, limit = 16 * 1024 * 1024) {
   });
 }
 
+// 下载时的文件名：ASCII 兜底 + RFC 5987 的 UTF-8 文件名，中文名也不会乱码。
+function contentDisposition(type, name) {
+  const fallback = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_') || 'file';
+  return `${type}; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name).replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
+}
+
 function sameToken(actual, expected) {
   const a = Buffer.from(actual || '');
   const b = Buffer.from(expected);
@@ -44,6 +52,8 @@ function sameToken(actual, expected) {
 
 export function createServer({ config, sessions, cards, discord, models, scheduler, people, guestUsage, dataDir = defaultDataDir, token, onConfigChange, onShutdown }) {
   const clients = new Set();
+  // send_file 不能外发的位置：Claw 数据目录（含令牌与会话记录）、Claude Code 凭据、SSH 密钥。
+  const blockedOutgoing = [dataDir, path.join(homedir(), '.claude', '.credentials.json'), path.join(homedir(), '.ssh')];
   const broadcast = payload => {
     const data = `data: ${JSON.stringify(payload)}\n\n`;
     for (const res of clients) res.write(data);
@@ -74,18 +84,31 @@ export function createServer({ config, sessions, cards, discord, models, schedul
     ['POST', /^\/api\/sessions\/([\w-]+)\/reset$/, async (req, [id]) => sessions.summary(sessions.reset(id))],
     ['POST', /^\/api\/sessions\/([\w-]+)\/interrupt$/, async (req, [id]) => { sessions.interrupt(id); return { ok: true }; }],
     ['POST', /^\/api\/sessions\/([\w-]+)\/messages$/, async (req, [id]) => {
-      const body = await readBody(req, 160 * 1024 * 1024);
+      const body = await readBody(req, 320 * 1024 * 1024);
       const meta = sessions.get(id);
       if (meta.origin !== 'panel') throw new HttpError(400, 'Discord 会话只能在 Discord 中发言；面板里可以查看与中断');
       const raw = Array.isArray(body.images) ? body.images : [];
+      const rawFiles = Array.isArray(body.files) ? body.files : [];
       if (raw.length > MAX_IMAGES) throw new HttpError(400, `一条消息最多 ${MAX_IMAGES} 张图片`);
-      const { images, notes } = await ingestImages(dataDir, id, raw.map(item => ({ name: String(item.name || ''), buffer: Buffer.from(String(item.base64 || ''), 'base64') })));
+      if (rawFiles.length > MAX_FILES) throw new HttpError(400, `一条消息最多 ${MAX_FILES} 个文件`);
+      const decode = item => ({ name: String(item.name || ''), buffer: Buffer.from(String(item.base64 || ''), 'base64') });
+      const { images, notes } = await ingestImages(dataDir, id, raw.map(decode));
       if (raw.length && !images.length) throw new HttpError(400, notes.join(' ') || '图片处理失败');
-      const text = [String(body.text || ''), ...notes].filter(Boolean).join('\n');
-      if (!text.trim() && !images.length) throw new HttpError(400, '消息不能为空');
+      // 面板会话都是主人会话：附件另存到工作目录，方便她用工具处理。
+      const { files, documents, notes: fileNotes } = await ingestFiles(dataDir, id, rawFiles.map(decode), { saveDir: path.join(meta.cwd, '.claw-attachments') });
+      if (rawFiles.length && !files.length) throw new HttpError(400, fileNotes.join(' ') || '文件处理失败');
+      const text = [String(body.text || ''), ...notes, ...fileNotes].filter(Boolean).join('\n');
+      if (!text.trim() && !images.length && !files.length) throw new HttpError(400, '消息不能为空');
       // 不等待生成完成：结果通过 SSE 推送。
-      sessions.send(id, { text, images, from: meta.userName, via: 'panel' }).catch(() => {});
-      return { ok: true, images: images.length };
+      sessions.send(id, { text, images, files, documents, from: meta.userName, via: 'panel' }).catch(() => {});
+      return { ok: true, images: images.length, files: files.length };
+    }],
+    // claw MCP 的 send_file：只能给发起调用的会话附文件，且只在本轮进行中有效。
+    ['POST', /^\/api\/outbox$/, async (req) => {
+      const sessionId = String(req.headers['x-claw-session'] || '');
+      if (!sessionId) throw new HttpError(400, '缺少会话标识');
+      const body = await readBody(req);
+      return sessions.addOutgoingFile(sessionId, body.path, body.name, blockedOutgoing);
     }],
     ['GET', /^\/api\/sessions\/([\w-]+)\/preview$/, async (req, [id], url) => sessions.preview(id, url.searchParams.get('text') || undefined)],
     ['POST', /^\/api\/permissions\/([\w-]+)$/, async (req, [requestId]) => {
@@ -310,6 +333,21 @@ export function createServer({ config, sessions, cards, discord, models, schedul
         const file = path.join(dataDir, 'uploads', upload[1], upload[2]);
         const body = await readFile(file).catch(() => { throw new HttpError(404, '图片不存在'); });
         res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'image/jpeg', 'cache-control': 'private, max-age=31536000, immutable' });
+        res.end(body);
+        return;
+      }
+      // 聊天记录里的附件：对方发来的（in）与她发出的（out）。只有常见图片按图片内联显示，其余一律当作下载，
+      // 避免 HTML/SVG 之类的文件在面板同源下被当成网页执行。
+      const stored = /^\/api\/files\/([\w-]+)\/(in|out)\/([\w.-]+)$/.exec(url.pathname);
+      if (req.method === 'GET' && stored) {
+        const body = await readFile(uploadPath(dataDir, stored.slice(1).join('/'))).catch(() => { throw new HttpError(404, '文件不存在'); });
+        const name = (url.searchParams.get('name') || stored[3]).slice(0, 200);
+        const image = url.searchParams.get('inline') === '1' ? inlineImageType(stored[3]) : '';
+        res.writeHead(200, {
+          'content-type': image || 'application/octet-stream',
+          'content-disposition': contentDisposition(image ? 'inline' : 'attachment', name),
+          'cache-control': 'private, max-age=31536000, immutable',
+        });
         res.end(body);
         return;
       }

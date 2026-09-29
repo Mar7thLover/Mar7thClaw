@@ -148,6 +148,7 @@ test('MCP 服务：握手、列出工具、调用时绑定会话并转发到核�
       calls.push({ method: req.method, url: req.url, token: req.headers['x-claw-token'], session: req.headers['x-claw-session'], body: body ? JSON.parse(body) : null });
       res.writeHead(req.url.endsWith('/nope') ? 404 : 200, { 'content-type': 'application/json' });
       if (req.url.endsWith('/nope')) return res.end(JSON.stringify({ error: '定时任务不存在' }));
+      if (req.url === '/api/outbox') return res.end(JSON.stringify({ name: 'report.pdf', size: 2048, file: 'sess-1/out/1.pdf' }));
       const job = { id: 'j1', title: '早报', description: '每天 09:00', enabled: true, nextRunAt: new Date().toISOString(), prompt: '汇总', lastResult: null };
       res.end(JSON.stringify(req.method === 'GET' ? [job] : job));
     });
@@ -166,13 +167,16 @@ test('MCP 服务：握手、列出工具、调用时绑定会话并转发到核�
   assert.equal(init.result.serverInfo.name, 'claw');
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
   const tools = await rpc('tools/list', {});
-  assert.deepEqual(tools.result.tools.map(tool => tool.name), ['schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete']);
+  assert.deepEqual(tools.result.tools.map(tool => tool.name), ['schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete', 'send_file']);
   const created = await rpc('tools/call', { name: 'schedule_create', arguments: { title: '早报', prompt: '汇总', cron: '0 9 * * *' } });
   assert.match(created.result.content[0].text, /已创建/);
   assert.deepEqual(calls[0], { method: 'POST', url: '/api/schedules', token: 'tok', session: 'sess-1', body: { title: '早报', prompt: '汇总', cron: '0 9 * * *', sessionId: 'sess-1' } });
   const failed = await rpc('tools/call', { name: 'schedule_delete', arguments: { id: 'nope' } });
   assert.equal(failed.result.isError, true);
   assert.match(failed.result.content[0].text, /不存在/);
+  const sent = await rpc('tools/call', { name: 'send_file', arguments: { path: 'out/report.pdf' } });
+  assert.match(sent.result.content[0].text, /已附上「report.pdf」（2KB）/);
+  assert.deepEqual(calls.at(-1), { method: 'POST', url: '/api/outbox', token: 'tok', session: 'sess-1', body: { path: 'out/report.pdf' } });
   const unknown = await rpc('resources/list', {});
   assert.equal(unknown.error.code, -32601);
 });

@@ -43,10 +43,10 @@
 
   const notificationsOn = () => state.config?.desktop?.notifications !== false;
 
-  const TOOL_LABELS = { ToolSearch: '加载工具', mcp__claw__schedule_create: '登记定时任务', mcp__claw__schedule_list: '查看定时任务', mcp__claw__schedule_update: '修改定时任务', mcp__claw__schedule_delete: '删除定时任务', Bash: '运行命令', PowerShell: '运行命令', Read: '读取文件', Write: '写入文件', Edit: '修改文件', MultiEdit: '修改文件', Glob: '查找文件', Grep: '搜索内容', WebFetch: '读取网页', WebSearch: '上网搜索', Task: '派出帮手', Agent: '派出帮手', TodoWrite: '整理待办', NotebookEdit: '修改笔记本' };
+  const TOOL_LABELS = { ToolSearch: '加载工具', mcp__claw__schedule_create: '登记定时任务', mcp__claw__schedule_list: '查看定时任务', mcp__claw__schedule_update: '修改定时任务', mcp__claw__schedule_delete: '删除定时任务', mcp__claw__send_file: '发送文件', Bash: '运行命令', PowerShell: '运行命令', Read: '读取文件', Write: '写入文件', Edit: '修改文件', MultiEdit: '修改文件', Glob: '查找文件', Grep: '搜索内容', WebFetch: '读取网页', WebSearch: '上网搜索', Task: '派出帮手', Agent: '派出帮手', TodoWrite: '整理待办', NotebookEdit: '修改笔记本' };
   const toolDetail = input => {
     if (!input || typeof input !== 'object') return '';
-    return String(input.title || input.command || input.file_path || input.pattern || input.url || input.query || input.description || input.prompt || '').replace(/\s+/g, ' ').slice(0, 140);
+    return String(input.title || input.command || input.file_path || input.path || input.pattern || input.url || input.query || input.description || input.prompt || '').replace(/\s+/g, ' ').slice(0, 140);
   };
 
   // ---------------- 状态栏 ----------------
@@ -180,6 +180,29 @@
   }
 
   // ---------------- 消息渲染 ----------------
+  const sizeText = bytes => bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.ceil(bytes / 1024))}KB`;
+  const fileUrl = (file, extra = '') => `/api/files/${file.file}?token=${encodeURIComponent(token)}&name=${encodeURIComponent(file.name)}${extra}`;
+  const extLabel = name => (/\.([^.]{1,5})$/.exec(name || '')?.[1] || 'file').toUpperCase();
+  const FILE_KIND = { text: '已读取', pdf: 'PDF', binary: '已保存' };
+
+  // 附件：图片显示缩略图（点开放大），其余显示成可下载的文件卡片。
+  function fileChips(files, { outgoing = false } = {}) {
+    if (!files?.length) return null;
+    const images = outgoing ? files.filter(file => file.mediaType) : [];
+    const others = files.filter(file => !images.includes(file));
+    return el('div', { class: 'msg-files' },
+      images.length ? el('div', { class: `msg-images${images.length > 2 ? ' many' : ''}` }, images.map(file => {
+        const src = fileUrl(file, '&inline=1');
+        return el('img', { src, alt: file.name, title: file.name, loading: 'lazy', onclick: () => openLightbox(src) });
+      })) : null,
+      others.map(file => {
+        const hint = outgoing ? '' : file.kind === 'text' ? (file.truncated ? '已读取前一部分' : FILE_KIND.text) : file.kind === 'pdf' ? (file.inline ? 'PDF 已读取' : 'PDF 未内联') : FILE_KIND.binary;
+        return el('a', { class: 'file-chip', href: fileUrl(file), download: file.name, title: file.path ? `${file.name}\n${file.path}` : file.name },
+          el('span', { class: 'file-ext' }, extLabel(file.name)),
+          el('span', { class: 'file-info' }, el('span', { class: 'file-name' }, file.label || file.name), el('span', { class: 'file-size' }, [sizeText(file.size), hint].filter(Boolean).join(' · '))));
+      }));
+  }
+
   function toolNode(tool, running) {
     const stateClass = tool.result === undefined ? (running ? 'run' : '') : tool.isError ? 'err' : 'ok';
     const stateText = tool.result === undefined ? (running ? '…' : '') : tool.isError ? '✗' : '✓';
@@ -203,19 +226,20 @@
     if (entry.error && !entry.interrupted) foot.push(el('span', { style: 'color: var(--danger)' }, entry.error));
     return el('div', { class: `msg assistant${entry.error && !entry.interrupted ? ' error' : ''}` },
       el('div', { class: 'from' }, entry.greeting ? `${name} · 开场白` : name), thinking, tools, body,
+      fileChips(entry.files, { outgoing: true }),
       foot.length ? el('div', { class: 'msg-foot' }, foot) : null);
   }
 
   function entryNode(entry) {
     if (entry.kind === 'user') {
       const body = el('div', { class: 'content' });
-      const onlyImages = entry.images?.length && /^（发来了 \d+ 张图片）$/.test(entry.text);
+      const onlyImages = (entry.images?.length || entry.files?.length) && /^（发来了 [^）]+）$/.test(entry.text);
       if (!onlyImages) body.innerHTML = window.renderMarkdown(entry.text);
       const images = entry.images?.length ? el('div', { class: `msg-images${entry.images.length > 2 ? ' many' : ''}` }, entry.images.map(image => {
         const src = `/api/uploads/${image.file}?token=${encodeURIComponent(token)}`;
         return el('img', { src, alt: '图片', loading: 'lazy', onclick: () => openLightbox(src) });
       })) : null;
-      return el('div', { class: 'msg user' }, el('div', { class: 'from' }, `${entry.from}${entry.via && entry.via !== 'panel' ? ` · ${entry.via}` : ''}`), images, onlyImages ? null : body);
+      return el('div', { class: 'msg user' }, el('div', { class: 'from' }, `${entry.from}${entry.via && entry.via !== 'panel' ? ` · ${entry.via}` : ''}`), images, fileChips(entry.files), onlyImages ? null : body);
     }
     if (entry.kind === 'assistant') return assistantNode(entry, false);
     if (entry.kind === 'divider') return el('div', { class: 'divider' }, entry.text);
@@ -300,7 +324,7 @@
     if (e.type === 'permission_open') { state.permissions.set(e.request.requestId, { sessionId: id, request: e.request, expiresAt: e.expiresAt }); renderPermissions(); if (desktop) desktop.attention(notificationsOn()); return; }
     if (e.type === 'permission_closed') { state.permissions.delete(e.requestId); renderPermissions(); return; }
     let live = state.live.get(id);
-    if (e.type === 'turn_start') { state.live.set(id, { text: '', thinking: '', tools: [], activated: [] }); }
+    if (e.type === 'turn_start') { state.live.set(id, { text: '', thinking: '', tools: [], activated: [], files: [] }); }
     else if (!live) { if (e.type === 'entry' && id === state.current) { state.transcript.push(e.entry); renderChat(); } return; }
     live = state.live.get(id);
     switch (e.type) {
@@ -310,6 +334,7 @@
       case 'thinking': live.thinking += e.text; break;
       case 'tool_use': live.tools.push({ id: e.id, name: e.name, input: e.input }); break;
       case 'tool_result': { const t = live.tools.find(x => x.id === e.id); if (t) { t.result = e.text; t.isError = e.isError; } break; }
+      case 'file_out': live.files.push(e.file); break;
       case 'entry':
         if (e.entry.kind === 'assistant' && e.entry.turnId) {
           e.entry.activated = live.activated;
@@ -344,55 +369,64 @@
   $('composer').addEventListener('submit', async event => {
     event.preventDefault();
     const text = $('input').value.trim();
-    if (!text && !pendingImages.length) return;
+    if (!text && !pendingItems.length) return;
     let s = currentSession();
-    const images = pendingImages.slice();
+    const items = pendingItems.slice();
+    const images = items.filter(item => item.kind === 'image');
+    const files = items.filter(item => item.kind === 'file');
     try {
       if (!s) { s = await api('POST', '/api/sessions', {}); state.sessions.unshift(s); await selectSession(s.id); }
       $('input').value = '';
       autosize();
-      pendingImages = [];
+      pendingItems = [];
       renderAttachTray();
-      if (images.length) toast(`正在发送 ${images.length} 张图片…`);
-      await api('POST', `/api/sessions/${s.id}/messages`, { text, images: images.map(image => ({ name: image.name, base64: image.base64 })) });
+      if (items.length) toast(`正在发送 ${[images.length ? `${images.length} 张图片` : '', files.length ? `${files.length} 个文件` : ''].filter(Boolean).join('和')}…`);
+      await api('POST', `/api/sessions/${s.id}/messages`, { text, images: images.map(item => ({ name: item.name, base64: item.base64 })), files: files.map(item => ({ name: item.name, base64: item.base64 })) });
     } catch (error) {
       toast(error.message);
-      if (!pendingImages.length) { pendingImages = images; renderAttachTray(); }
+      if (!pendingItems.length) { pendingItems = items; renderAttachTray(); }
     }
   });
-  // ---------------- 图片附件 ----------------
+  // ---------------- 附件（图片与文件） ----------------
+  // 图片以图片内容块发给她；其他文件存到工作目录的 .claw-attachments/，文本和 PDF 的内容直接交给她读。
   const MAX_IMAGES = 6;
-  const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
-  let pendingImages = [];
+  const MAX_FILES = 10;
+  const MAX_ATTACH_BYTES = 25 * 1024 * 1024;
+  const IMAGE_TYPES = /^image\/(png|jpe?g|gif|webp|bmp|tiff|avif|heic|heif)$/i;
+  let pendingItems = [];
   function renderAttachTray() {
     const tray = $('attach-tray');
-    tray.classList.toggle('hidden', !pendingImages.length);
-    tray.replaceChildren(...pendingImages.map((image, index) => el('div', { class: 'attach-item', title: image.name },
-      el('img', { src: image.preview, alt: image.name }),
-      el('span', { class: 'attach-size' }, image.size > 1048576 ? `${(image.size / 1048576).toFixed(1)}MB` : `${Math.ceil(image.size / 1024)}KB`),
-      el('button', { type: 'button', title: '移除', 'aria-label': `移除 ${image.name}`, onclick: () => { pendingImages.splice(index, 1); renderAttachTray(); } }, '✕'))));
+    tray.classList.toggle('hidden', !pendingItems.length);
+    tray.replaceChildren(...pendingItems.map((item, index) => el('div', { class: `attach-item${item.kind === 'file' ? ' is-file' : ''}`, title: item.name },
+      item.kind === 'image' ? el('img', { src: item.preview, alt: item.name }) : el('div', { class: 'attach-file' }, el('span', { class: 'file-ext' }, extLabel(item.name)), el('span', { class: 'attach-name' }, item.name)),
+      el('span', { class: 'attach-size' }, sizeText(item.size)),
+      el('button', { type: 'button', title: '移除', 'aria-label': `移除 ${item.name}`, onclick: () => { pendingItems.splice(index, 1); renderAttachTray(); } }, '✕'))));
   }
   function readAsDataUrl(file) {
     return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file); });
   }
-  async function addImages(files) {
+  async function addFiles(files) {
     const s = currentSession();
-    if (s && s.origin === 'discord') { toast('Discord 会话只能在 Discord 里发图'); return; }
+    if (s && s.origin === 'discord') { toast('Discord 会话只能在 Discord 里发附件'); return; }
     for (const file of files) {
-      if (!file.type.startsWith('image/')) { toast(`${file.name || '文件'} 不是图片`); continue; }
-      if (pendingImages.length >= MAX_IMAGES) { toast(`一条消息最多 ${MAX_IMAGES} 张图片`); break; }
-      if (file.size > MAX_IMAGE_BYTES) { toast(`${file.name} 超过 25MB`); continue; }
+      const kind = IMAGE_TYPES.test(file.type) ? 'image' : 'file';
+      const count = pendingItems.filter(item => item.kind === kind).length;
+      if (kind === 'image' && count >= MAX_IMAGES) { toast(`一条消息最多 ${MAX_IMAGES} 张图片`); continue; }
+      if (kind === 'file' && count >= MAX_FILES) { toast(`一条消息最多 ${MAX_FILES} 个文件`); continue; }
+      if (file.size > MAX_ATTACH_BYTES) { toast(`${file.name} 超过 25MB`); continue; }
       const dataUrl = await readAsDataUrl(file);
-      pendingImages.push({ name: file.name || `粘贴的图片.${file.type.split('/')[1] || 'png'}`, size: file.size, preview: dataUrl, base64: dataUrl.slice(dataUrl.indexOf(',') + 1) });
+      const name = file.name || (kind === 'image' ? `粘贴的图片.${file.type.split('/')[1] || 'png'}` : '粘贴的文件');
+      pendingItems.push({ kind, name, size: file.size, preview: kind === 'image' ? dataUrl : '', base64: dataUrl.slice(dataUrl.indexOf(',') + 1) });
     }
     renderAttachTray();
     $('input').focus();
   }
   $('attach-btn').addEventListener('click', () => $('attach-input').click());
-  $('attach-input').addEventListener('change', () => { addImages([...$('attach-input').files]); $('attach-input').value = ''; });
+  $('attach-input').addEventListener('change', () => { addFiles([...$('attach-input').files]); $('attach-input').value = ''; });
   $('input').addEventListener('paste', event => {
-    const files = [...(event.clipboardData?.files || [])].filter(file => file.type.startsWith('image/'));
-    if (files.length) { event.preventDefault(); addImages(files); }
+    // 粘贴截图或资源管理器里复制的文件；纯文字照常粘贴。
+    const files = [...(event.clipboardData?.files || [])];
+    if (files.length) { event.preventDefault(); addFiles(files); }
   });
   const composer = $('composer');
   composer.addEventListener('dragover', event => { if ([...event.dataTransfer.types].includes('Files')) { event.preventDefault(); composer.classList.add('dragging'); } });
@@ -401,7 +435,7 @@
     composer.classList.remove('dragging');
     if (!event.dataTransfer.files.length) return;
     event.preventDefault();
-    addImages([...event.dataTransfer.files]);
+    addFiles([...event.dataTransfer.files]);
   });
   // 窗口其他地方误拖放时不要让 Electron/浏览器直接打开文件。
   window.addEventListener('dragover', event => event.preventDefault());

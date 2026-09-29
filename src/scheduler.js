@@ -226,7 +226,7 @@ export class Scheduler extends EventEmitter {
       ].filter(Boolean);
       result = await this.sessions.send(meta.id, { text: lines.join('\n'), from: '定时任务', via: 'schedule' }, this.hooksFor(meta));
     } catch (error) {
-      result = { ok: false, error: error.message, entry: { text: '' } };
+      result = { ok: false, error: error.message, entry: { text: '' }, files: error.files || [] };
     }
     const text = (result.entry?.text || result.text || '').trim();
     job.lastRunAt = startedAt.toISOString();
@@ -236,7 +236,7 @@ export class Scheduler extends EventEmitter {
     if (this.jobs.includes(job)) this.save();
     this.arm();
     this.log(`[schedule] 「${job.title}」运行${result.ok === false ? `失败：${result.error}` : '完成'}`);
-    try { await this.deliver({ job: this.view(job), session: meta, text, ok: result.ok !== false, error: result.error || '' }); }
+    try { await this.deliver({ job: this.view(job), session: meta, text, ok: result.ok !== false, error: result.error || '', files: result.files || [] }); }
     catch (error) { this.log(`[schedule] 推送结果失败：${error.message}`); }
     this.emit('run', { job: this.view(job), phase: 'end', ok: result.ok !== false });
     return this.view(job);

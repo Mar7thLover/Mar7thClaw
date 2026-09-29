@@ -89,10 +89,12 @@ export async function runTurn(turn, { claudeBin, tmpDir, signal, onEvent = () =>
     closed = new Promise(resolve => child.once('close', code => resolve(code)));
     signal?.addEventListener('abort', onAbort, { once: true });
     const send = value => { if (!child.stdin.destroyed && child.stdin.writable) child.stdin.write(JSON.stringify(value) + '\n'); };
-    // 图片作为内容块直接交给模型（不依赖 Read 工具，访客也能看图），放在文字之前。
-    const content = turn.images?.length
-      ? [...turn.images.map(image => ({ type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } })), { type: 'text', text: turn.prompt }]
-      : turn.prompt;
+    // 图片和 PDF 作为内容块直接交给模型（不依赖 Read 工具，访客也能用），放在文字之前。
+    const blocks = [
+      ...(turn.images || []).map(image => ({ type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } })),
+      ...(turn.documents || []).map(doc => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: doc.data }, title: doc.name })),
+    ];
+    const content = blocks.length ? [...blocks, { type: 'text', text: turn.prompt }] : turn.prompt;
     send({ type: 'user', message: { role: 'user', content } });
     lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
     let result;

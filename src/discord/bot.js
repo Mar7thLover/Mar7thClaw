@@ -4,16 +4,23 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import {
   Client, GatewayIntentBits, Partials, Events, ActivityType, MessageFlags,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder, AttachmentBuilder,
 } from 'discord.js';
 import { chunkMessage } from './chunk.js';
 import { compileMentionPatterns, evaluateMessage, stripBotMention, inConfiguredGuild } from './gating.js';
 import { extractReactions, stripReactionTags } from './reactions.js';
 import { ingestImages, looksLikeImage, MAX_IMAGES } from '../images.js';
+import { ingestFiles, guessKind, formatSize, uploadPath, MAX_FILES, MAX_GUEST_TEXT_BYTES, MAX_PDF_BYTES } from '../attachments.js';
 
-const TOOL_LABELS = { ToolSearch: '加载工具', mcp__claw__schedule_create: '登记定时任务', mcp__claw__schedule_list: '查看定时任务', mcp__claw__schedule_update: '修改定时任务', mcp__claw__schedule_delete: '删除定时任务', Bash: '运行命令', PowerShell: '运行命令', Read: '读取文件', Write: '写入文件', Edit: '修改文件', Glob: '查找文件', Grep: '搜索内容', WebFetch: '读取网页', WebSearch: '上网搜索', Task: '派出帮手', Agent: '派出帮手', TodoWrite: '整理待办' };
+const TOOL_LABELS = { ToolSearch: '加载工具', mcp__claw__schedule_create: '登记定时任务', mcp__claw__schedule_list: '查看定时任务', mcp__claw__schedule_update: '修改定时任务', mcp__claw__schedule_delete: '删除定时任务', mcp__claw__send_file: '发送文件', Bash: '运行命令', PowerShell: '运行命令', Read: '读取文件', Write: '写入文件', Edit: '修改文件', Glob: '查找文件', Grep: '搜索内容', WebFetch: '读取网页', WebSearch: '上网搜索', Task: '派出帮手', Agent: '派出帮手', TodoWrite: '整理待办' };
 const PERMISSION_CHOICES = ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions'];
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+// Bot 能上传的单个文件大小取决于服务器加成等级；私信与未加成服务器是 10MB。
+function uploadLimit(channel) {
+  const tier = channel?.guild?.premiumTier ?? 0;
+  return (tier >= 3 ? 100 : tier === 2 ? 50 : 10) * 1024 * 1024;
+}
 
 function speakerLabel(message) {
   const name = message.member?.displayName || message.author.globalName || message.author.username;
@@ -26,7 +33,7 @@ function displayName(message) {
 
 function toolSummary(name, input = {}) {
   const label = TOOL_LABELS[name] || name;
-  const detail = input.title || input.command || input.file_path || input.pattern || input.url || input.query || input.description || '';
+  const detail = input.title || input.command || input.file_path || input.path || input.pattern || input.url || input.query || input.description || '';
   return detail ? `${label}：${String(detail).replace(/\s+/g, ' ').slice(0, 80)}` : label;
 }
 
@@ -167,41 +174,51 @@ export class DiscordBot extends EventEmitter {
     });
   }
 
-  async download(attachment) {
-    if (attachment.size > MAX_ATTACHMENT_BYTES) throw new Error('超过 25MB');
+  async download(attachment, limit = MAX_ATTACHMENT_BYTES) {
+    if (attachment.size > limit) throw new Error(`超过 ${formatSize(limit)}`);
     const response = await fetch(attachment.url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return Buffer.from(await response.arrayBuffer());
   }
 
   /**
-   * 处理附件：图片（含被回复消息里的图片）以图片内容块直接交给模型，所有人都能用；
-   * 主人的附件另存到会话工作目录，方便她用工具进一步处理；访客的非图片附件只保留占位符。
+   * 处理附件（含被回复消息里的附件）：
+   * - 图片以图片内容块、PDF 以文档块直接交给模型，文本类文件解码后内联，所有人都能用；
+   * - 主人的附件另存到会话工作目录，其他格式由她用工具处理；访客的其他格式只保留占位符，也不下载。
    */
   async processAttachments(message, meta, referenced = null) {
     const notes = [];
     const imageItems = [];
+    const fileItems = [];
+    const owner = meta.tier === 'owner';
     const sources = [...message.attachments.values()].map(a => ({ a, fromReply: false }));
-    if (referenced) sources.push(...[...referenced.attachments.values()].filter(a => looksLikeImage(a.name, a.contentType)).map(a => ({ a, fromReply: true })));
+    if (referenced) sources.push(...[...referenced.attachments.values()].map(a => ({ a, fromReply: true })));
     const ownerDir = path.join(meta.cwd, '.claw-attachments');
     for (const { a, fromReply } of sources) {
+      const label = fromReply ? `被回复消息中的 ${a.name}` : a.name;
       const isImage = looksLikeImage(a.name, a.contentType);
-      if (!isImage && meta.tier !== 'owner') { notes.push(`<附件:${a.name}>`); continue; }
-      if (isImage && imageItems.length >= MAX_IMAGES) { notes.push(`<图片 ${a.name} 超出单条消息上限，未发送>`); continue; }
+      const kind = isImage ? 'image' : guessKind(a.name, a.contentType);
+      if (!owner && kind === 'binary') { notes.push(`<附件:${label}（这类文件没办法直接读取）>`); continue; }
+      if (isImage && imageItems.length >= MAX_IMAGES) { notes.push(`<图片 ${label} 超出单条消息上限，未发送>`); continue; }
+      if (!isImage && fileItems.length >= MAX_FILES) { notes.push(`<附件 ${label} 超出单条消息上限，未接收>`); continue; }
+      // 访客的文本类附件只取前面一部分（超出的也不会内联），PDF 超过内联上限就不下载了。
+      const limit = owner ? MAX_ATTACHMENT_BYTES : kind === 'pdf' ? MAX_PDF_BYTES : kind === 'image' ? MAX_ATTACHMENT_BYTES : MAX_GUEST_TEXT_BYTES;
       let buffer;
-      try { buffer = await this.download(a); } catch (error) { notes.push(`<附件 ${a.name} 下载失败：${error.message}>`); continue; }
-      if (isImage) imageItems.push({ name: fromReply ? `被回复消息中的 ${a.name}` : a.name, buffer });
-      if (meta.tier === 'owner' && !fromReply) {
+      try { buffer = await this.download(a, limit); } catch (error) { notes.push(`<附件 ${label} 下载失败：${error.message}>`); continue; }
+      if (!isImage) { fileItems.push({ name: a.name, label, buffer }); continue; }
+      imageItems.push({ name: label, buffer });
+      if (owner) {
         mkdirSync(ownerDir, { recursive: true });
         const file = path.join(ownerDir, `${message.id}-${a.name.replace(/[^\w.\u4e00-\u9fff-]/g, '_')}`);
         writeFileSync(file, buffer);
-        notes.push(`<附件已保存：${file}>`);
+        notes.push(`<图片已保存：${file}>`);
       }
     }
     for (const sticker of message.stickers?.values?.() || []) notes.push(`<贴纸:${sticker.name}>`);
     const { images, notes: imageNotes } = await ingestImages(this.dataDir, meta.id, imageItems);
-    if (referenced && images.some(image => image.name.startsWith('被回复消息'))) notes.push('<部分图片来自被回复的那条消息>');
-    return { notes: [...notes, ...imageNotes].join('\n'), images };
+    const { files, documents, notes: fileNotes } = await ingestFiles(this.dataDir, meta.id, fileItems, { saveDir: owner ? ownerDir : null, prefix: message.id });
+    if (referenced && [...images, ...files].some(item => (item.label || item.name).startsWith('被回复消息'))) notes.push('<部分附件来自被回复的那条消息>');
+    return { notes: [...notes, ...imageNotes, ...fileNotes].join('\n'), images, files, documents };
   }
 
   async onMessage(message) {
@@ -230,11 +247,11 @@ export class DiscordBot extends EventEmitter {
         if (!facts.replyToBot) replyTo = { from: speakerLabel(referenced), text: referenced.content.slice(0, 2000) };
       } catch { /* 被引用的消息可能已删除 */ }
     }
-    const typingEarly = message.attachments.size ? message.channel.sendTyping().catch(() => {}) : null;
-    const { notes, images } = await this.processAttachments(message, meta, referenced);
+    const typingEarly = message.attachments.size || referenced?.attachments?.size ? message.channel.sendTyping().catch(() => {}) : null;
+    const { notes, images, files, documents } = await this.processAttachments(message, meta, referenced);
     await typingEarly;
     const text = [stripBotMention(message.content, this.client.user.id), notes].filter(Boolean).join('\n');
-    if (!text.trim() && !images.length) return;
+    if (!text.trim() && !images.length && !files.length) return;
     const historyEntries = !message.guildId ? [] : this.histories.get(message.channelId) || [];
     const channelHistory = !message.guildId ? '' : this.historyBlock(message.channelId);
     this.histories.delete(message.channelId);
@@ -245,7 +262,7 @@ export class DiscordBot extends EventEmitter {
       historyAuthorIds: historyEntries.map(entry => entry.authorId),
       text: [text, replyTo?.text || '', channelHistory].join('\n'),
     });
-    await this.runAndReply(message, meta, { text, images, from: displayName(message), via, channelHistory, replyTo, ...extras });
+    await this.runAndReply(message, meta, { text, images, files, documents, from: displayName(message), via, channelHistory, replyTo, ...extras });
   }
 
   // 访客额度：用完时回一句（每个周期只提示一次，之后只加 ⏳ 反应），返回是否放行。
@@ -319,7 +336,7 @@ export class DiscordBot extends EventEmitter {
     try {
       result = await this.sessions.send(meta.id, payload, hooks);
     } catch (error) {
-      result = { ok: false, error: error.code === 'cancelled' ? '已取消' : error.message, entry: { text: previewText } };
+      result = { ok: false, error: error.code === 'cancelled' ? '已取消' : error.message, entry: { text: previewText }, files: error.files || [] };
     } finally {
       clearInterval(typingTimer);
       clearTimeout(editTimer);
@@ -329,8 +346,10 @@ export class DiscordBot extends EventEmitter {
     if (message && this.cfg.reactions !== false) {
       for (const emoji of extracted.reactions) await message.react(emoji).catch(error => this.log(`[discord] 表情反应失败 ${emoji}：${error.message}`));
     }
+    const { attachments, skipped } = this.outgoingAttachments(channel, result.files || []);
+    if (skipped.length) finalText = `${finalText}\n-# 📎 ${skipped.join('；')}`.trim();
     // 只有表情没有文字：不发消息，删掉预览即可。
-    if (result.ok && !finalText && extracted.reactions.length && !interaction) {
+    if (result.ok && !finalText && !attachments.length && extracted.reactions.length && !interaction) {
       if (preview) await preview.delete().catch(() => {});
       return;
     }
@@ -339,22 +358,44 @@ export class DiscordBot extends EventEmitter {
       finalText = finalText ? `${finalText}\n\n-# ${reason}` : `呜…${reason}`;
     }
     const chunks = chunkMessage(finalText);
-    if (!chunks.length) chunks.push('……');
+    if (!chunks.length) chunks.push(attachments.length ? '📎' : '……');
+    const last = chunks.length - 1;
+    // 文件附在最后一块上；带附件发送失败（比如超过服务器上限）时退回只发文字并说明。
+    const withFiles = async (send, content, index, extra = {}) => {
+      if (index !== last || !attachments.length) return send({ content, ...extra });
+      try { return await send({ content, files: attachments, ...extra }); } catch (error) {
+        this.log(`[discord] 发送附件失败：${error.message}`);
+        return send({ content: `${content}\n-# 📎 附件发送失败（${error.message.slice(0, 120)}），可以在面板里下载`.slice(0, 2000), ...extra });
+      }
+    };
     if (interaction) {
-      await interaction.editReply({ content: chunks[0], allowedMentions: { parse: ['users'] } }).catch(() => channel?.send(chunks[0]));
-      for (const chunk of chunks.slice(1)) await interaction.followUp({ content: chunk, allowedMentions: { parse: ['users'] } }).catch(() => {});
+      await withFiles(payload => interaction.editReply(payload), chunks[0], 0, { allowedMentions: { parse: ['users'] } }).catch(() => channel?.send(chunks[0]));
+      for (const [index, chunk] of chunks.entries()) if (index > 0) await withFiles(payload => interaction.followUp(payload), chunk, index, { allowedMentions: { parse: ['users'] } }).catch(() => {});
       return;
     }
-    // 单块且不含提及时直接把预览改成最终回复；否则删掉预览重新发送（编辑不会触发提及通知）。
-    if (preview && chunks.length === 1 && !/<@[!&]?\d+>/.test(chunks[0])) {
+    // 单块、不含提及、也没有附件时直接把预览改成最终回复；否则删掉预览重新发送（编辑不会触发提及通知）。
+    if (preview && chunks.length === 1 && !attachments.length && !/<@[!&]?\d+>/.test(chunks[0])) {
       await preview.edit({ content: chunks[0], allowedMentions: { parse: ['users'] } }).catch(() => {});
       return;
     }
     if (preview) await preview.delete().catch(() => {});
     for (const [index, chunk] of chunks.entries()) {
-      if (index === 0) await message.reply({ content: chunk, allowedMentions: { parse: ['users'], repliedUser: false } }).catch(() => channel.send(chunk));
-      else await channel.send({ content: chunk, allowedMentions: { parse: ['users'] } });
+      if (index === 0) await withFiles(payload => message.reply(payload), chunk, index, { allowedMentions: { parse: ['users'], repliedUser: false } }).catch(() => channel.send(chunk));
+      else await withFiles(payload => channel.send(payload), chunk, index, { allowedMentions: { parse: ['users'] } });
     }
+  }
+
+  // 她用 send_file 交付的文件：超过本频道上传上限的跳过并说明（面板里仍可下载），一条消息最多 10 个附件。
+  outgoingAttachments(channel, files) {
+    const limit = uploadLimit(channel);
+    const attachments = [];
+    const skipped = [];
+    for (const file of files) {
+      if (file.size > limit) skipped.push(`「${file.name}」${formatSize(file.size)}，超过这里 ${formatSize(limit)} 的上传上限，可以在面板里下载`);
+      else if (attachments.length >= 10) skipped.push(`「${file.name}」超出单条消息 10 个附件的上限`);
+      else attachments.push(new AttachmentBuilder(uploadPath(this.dataDir, file.file), { name: file.name }));
+    }
+    return { attachments, skipped };
   }
 
   async askPermission(channel, meta, request, resolve) {
@@ -397,15 +438,21 @@ export class DiscordBot extends EventEmitter {
     };
   }
 
-  async deliverSchedule(meta, job, text, ok, error) {
+  async deliverSchedule(meta, job, text, ok, error, files = []) {
     const channel = await this.channelFor(meta);
     if (!channel) throw new Error('Discord 未连接或频道不可用');
     const mention = !meta.discord.dm && job.notifyUserId ? `<@${job.notifyUserId}> ` : '';
     const header = `${mention}-# ⏰ 定时任务「${job.title}」`;
-    const body = ok ? text || '（完成了，但没有输出）' : `呜…这次没做成：${error || '未知错误'}`;
+    const { attachments, skipped } = this.outgoingAttachments(channel, files);
+    const body = [ok ? text || (attachments.length ? '' : '（完成了，但没有输出）') : `呜…这次没做成：${error || '未知错误'}`, skipped.length ? `-# 📎 ${skipped.join('；')}` : ''].filter(Boolean).join('\n');
     const chunks = chunkMessage(`${header}
 ${body}`);
-    for (const chunk of chunks) await channel.send({ content: chunk, allowedMentions: { users: job.notifyUserId ? [job.notifyUserId] : [] } });
+    const allowedMentions = { users: job.notifyUserId ? [job.notifyUserId] : [] };
+    for (const [index, chunk] of chunks.entries()) {
+      if (index < chunks.length - 1 || !attachments.length) { await channel.send({ content: chunk, allowedMentions }); continue; }
+      await channel.send({ content: chunk, files: attachments, allowedMentions })
+        .catch(sendError => channel.send({ content: `${chunk}\n-# 📎 附件发送失败（${sendError.message.slice(0, 120)}），可以在面板里下载`.slice(0, 2000), allowedMentions }));
+    }
   }
 
   // 面板白名单页用：把用户 ID 解析成 Discord 名字（查不到的标记为未知）。
