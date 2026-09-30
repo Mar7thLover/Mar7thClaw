@@ -10,6 +10,7 @@ import { ModelCatalog } from './claude/models.js';
 import { Scheduler } from './scheduler.js';
 import { PeopleMemory } from './people.js';
 import { GuestUsage } from './guest.js';
+import { EmojiNotes } from './discord/emoji-notes.js';
 
 const log = (...args) => console.log(new Date().toISOString(), ...args);
 mkdirSync(dataDir, { recursive: true });
@@ -21,8 +22,9 @@ const token = randomBytes(24).toString('hex');
 const mcp = { url: `http://127.0.0.1:${config.port}`, token, script: path.join(root, 'src', 'mcp', 'claw-server.js') };
 const people = new PeopleMemory({ dataDir, config, claudeBin: config.claudeBin, log });
 const guestUsage = new GuestUsage({ dataDir, config });
+const emojiNotes = new EmojiNotes({ dataDir, config, claudeBin: config.claudeBin, log });
 const sessions = new SessionManager({ config, cards, dataDir, models, mcp, people });
-const discord = new DiscordBot({ config, sessions, dataDir, log, models, people, guestUsage });
+const discord = new DiscordBot({ config, sessions, dataDir, log, models, people, guestUsage, emojiNotes });
 const scheduler = new Scheduler({
   sessions, dataDir, log,
   hooksFor: meta => discord.hooksFor(meta),

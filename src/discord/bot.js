@@ -8,13 +8,19 @@ import {
 } from 'discord.js';
 import { chunkMessage } from './chunk.js';
 import { compileMentionPatterns, evaluateMessage, stripBotMention, inConfiguredGuild } from './gating.js';
-import { extractReactions, extractStickers, resolveStickers, stripReactionTags } from './reactions.js';
+import { extractReactions, extractStickers, resolveStickers, stripReactionTags, annotateEmojis, customEmojisIn, resolveEmojiNames } from './reactions.js';
+import { emojiImageUrl, stickerImageUrl } from './emoji-notes.js';
 import { ingestImages, looksLikeImage, MAX_IMAGES } from '../images.js';
 import { ingestFiles, guessKind, formatSize, uploadPath, MAX_FILES, MAX_GUEST_TEXT_BYTES, MAX_PDF_BYTES } from '../attachments.js';
 
 const TOOL_LABELS = { ToolSearch: '加载工具', mcp__claw__schedule_create: '登记定时任务', mcp__claw__schedule_list: '查看定时任务', mcp__claw__schedule_update: '修改定时任务', mcp__claw__schedule_delete: '删除定时任务', mcp__claw__send_file: '发送文件', Bash: '运行命令', PowerShell: '运行命令', Read: '读取文件', Write: '写入文件', Edit: '修改文件', Glob: '查找文件', Grep: '搜索内容', WebFetch: '读取网页', WebSearch: '上网搜索', Task: '派出帮手', Agent: '派出帮手', TodoWrite: '整理待办' };
 const PERMISSION_CHOICES = ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions'];
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+// 服务器表情目录放在 system 层（带缓存），满级加成的服务器最多 250 个静态 + 250 个动图。
+const MAX_EMOJIS = 200;
+const MAX_STICKERS = 60;
+// 插话被她接收时加在那条消息上的反应。
+const INTERJECT_REACTION = '📝';
 
 // Bot 能上传的单个文件大小取决于服务器加成等级；私信与未加成服务器是 10MB。
 function uploadLimit(channel) {
@@ -43,11 +49,14 @@ function describeInput(input) {
 }
 
 export class DiscordBot extends EventEmitter {
-  constructor({ config, sessions, dataDir, log = console.log, models = null, people = null, guestUsage = null }) {
+  constructor({ config, sessions, dataDir, log = console.log, models = null, people = null, guestUsage = null, emojiNotes = null }) {
     super();
     this.models = models;
     this.people = people;
     this.guestUsage = guestUsage;
+    this.emojiNotes = emojiNotes;
+    // 会话 ID → 正在进行的 Discord 回合 { authorId }：只有这时对方的新消息才可能插进去。
+    this.activeTurns = new Map();
     this.quotaNotified = new Map();
     this.config = config;
     this.sessions = sessions;
@@ -86,7 +95,13 @@ export class DiscordBot extends EventEmitter {
       client.user.setActivity('今天也是三月七~', { type: ActivityType.Custom });
       this.setState('ready');
       this.deployCommands().catch(error => this.log(`[discord] 斜杠命令注册失败：${error.message}`));
+      for (const guild of client.guilds.cache.values()) this.scanGuild(guild);
     });
+    // 表情和贴纸有增改时补上描述（Guilds intent 已包含这些事件）。
+    this.client.on(Events.GuildCreate, guild => this.scanGuild(guild));
+    for (const event of [Events.GuildEmojiCreate, Events.GuildEmojiUpdate, Events.GuildStickerCreate, Events.GuildStickerUpdate]) {
+      this.client.on(event, (item, updated) => this.scanGuild((updated || item).guild));
+    }
     this.client.on(Events.ShardDisconnect, () => this.setState('reconnecting'));
     this.client.on(Events.ShardResume, () => this.setState('ready'));
     this.client.on(Events.Error, error => this.log(`[discord] ${error.message}`));
@@ -144,7 +159,43 @@ export class DiscordBot extends EventEmitter {
 
   historyBlock(channelId) {
     const list = this.histories.get(channelId) || [];
-    return list.map(entry => `[${entry.ts.toLocaleString('zh-CN', { hour12: false })}] ${entry.label}: ${entry.text}`).join('\n');
+    return list.map(entry => `[${entry.ts.toLocaleString('zh-CN', { hour12: false })}] ${entry.label}: ${this.annotate(entry.text)}`).join('\n');
+  }
+
+  // ---- 表情：画面描述、名字解析 ----
+  annotate(text) {
+    return this.emojiNotes ? annotateEmojis(text, id => this.emojiNotes.get(id)) : text;
+  }
+
+  // 把服务器里还没有描述的表情和贴纸交给后台去看图描述。
+  scanGuild(guild) {
+    if (!this.emojiNotes || !guild || !(this.cfg.guilds?.[guild.id] || this.cfg.guilds?.['*'])) return;
+    const emojis = this.cfg.reactions === false ? [] : this.availableEmojis(guild).slice(0, MAX_EMOJIS);
+    const stickers = this.availableStickers(guild).slice(0, MAX_STICKERS);
+    this.emojiNotes.describe([
+      ...emojis.map(e => ({ id: e.id, kind: 'emoji', name: e.name, url: emojiImageUrl(e.id), context: guild.name })),
+      ...stickers.map(s => ({ id: s.id, kind: 'sticker', name: s.name, url: stickerImageUrl(s), context: guild.name })),
+    ]);
+  }
+
+  // 对方用了其他服务器的表情（Nitro）：同样补上描述，下次就能看懂。
+  noteForeignEmojis(text) {
+    if (!this.emojiNotes) return;
+    const found = customEmojisIn(text);
+    if (found.length) this.emojiNotes.describe(found.map(e => ({ id: e.id, kind: 'emoji', name: e.name, url: emojiImageUrl(e.id), context: '' })));
+  }
+
+  availableEmojis(guild) {
+    return [...(guild?.emojis?.cache?.values?.() || [])].filter(e => e.available !== false);
+  }
+
+  // :名字: → 本服务器表情的完整标签；重名时取第一个，大小写不敏感作为兜底。
+  emojiLookup(guild) {
+    const emojis = this.availableEmojis(guild);
+    return name => {
+      const found = emojis.find(e => e.name === name) || emojis.find(e => e.name.toLowerCase() === String(name).toLowerCase());
+      return found ? found.toString() : null;
+    };
   }
 
   extract(message) {
@@ -244,18 +295,25 @@ export class DiscordBot extends EventEmitter {
     if (message.reference?.messageId) {
       try {
         referenced = await message.fetchReference();
-        if (!facts.replyToBot) replyTo = { from: speakerLabel(referenced), text: referenced.content.slice(0, 2000) };
+        if (!facts.replyToBot) replyTo = { from: speakerLabel(referenced), text: this.annotate(referenced.content.slice(0, 2000)) };
       } catch { /* 被引用的消息可能已删除 */ }
     }
+    this.noteForeignEmojis(message.content);
     const typingEarly = message.attachments.size || referenced?.attachments?.size ? message.channel.sendTyping().catch(() => {}) : null;
     const { notes, images, files, documents } = await this.processAttachments(message, meta, referenced);
     await typingEarly;
-    const text = [stripBotMention(message.content, this.client.user.id), notes].filter(Boolean).join('\n');
+    const text = [this.annotate(stripBotMention(message.content, this.client.user.id)), notes].filter(Boolean).join('\n');
     if (!text.trim() && !images.length && !files.length) return;
     const historyEntries = !message.guildId ? [] : this.histories.get(message.channelId) || [];
     const channelHistory = !message.guildId ? '' : this.historyBlock(message.channelId);
-    this.histories.delete(message.channelId);
     const via = !message.guildId ? 'discord 私信' : `discord #${message.channel.name || message.channelId}`;
+    // 她正在忙这个会话里的任务：发起人（或主人）的新消息直接插进去，而不是排队等下一轮。
+    if (this.interject(meta, message.author.id, { text, images, files, documents, from: displayName(message), via, channelHistory, replyTo })) {
+      this.histories.delete(message.channelId);
+      await message.react(INTERJECT_REACTION).catch(() => {});
+      return;
+    }
+    this.histories.delete(message.channelId);
     const extras = this.contextExtras(message.guild, {
       speakerId: message.author.id,
       mentionedIds: [...message.mentions.users.keys()].filter(id => id !== this.client.user.id),
@@ -263,6 +321,20 @@ export class DiscordBot extends EventEmitter {
       text: [text, replyTo?.text || '', channelHistory].join('\n'),
     });
     await this.runAndReply(message, meta, { text, images, files, documents, from: displayName(message), via, channelHistory, replyTo, ...extras });
+  }
+
+  /**
+   * 插话：会话里有 Discord 触发的任务正在进行，且说话的人是发起人或主人时，把这条消息并入当前任务。
+   * 返回 false 时按原来的方式排队成新的一轮（任务刚好收尾、定时任务在跑、其他人说话、关掉了插话）。
+   */
+  interject(meta, authorId, payload) {
+    if (this.cfg.interject === false) return false;
+    const active = this.activeTurns.get(meta.id);
+    if (!active || (active.authorId !== authorId && !this.isOwner(authorId))) return false;
+    try { return this.sessions.inject(meta.id, payload); } catch (error) {
+      this.log(`[discord] 插话失败：${error.message}`);
+      return false;
+    }
   }
 
   // 访客额度：用完时回一句（每个周期只提示一次，之后只加 ⏳ 反应），返回是否放行。
@@ -284,13 +356,25 @@ export class DiscordBot extends EventEmitter {
   contextExtras(guild, activation) {
     const extras = { reactions: this.cfg.reactions !== false };
     if (this.people) extras.people = this.people.activate(activation);
+    const note = id => this.emojiNotes?.get(id) || '';
+    // 已有描述的会被跳过；这里兜底处理启动后才打开描述开关、或漏掉了表情更新事件的情况。
+    this.scanGuild(guild);
     if (guild && extras.reactions) {
-      const emojis = [...guild.emojis.cache.values()].filter(e => e.available !== false).slice(0, 30);
-      extras.emojis = emojis.map(e => `:${e.name}: → ${e.toString()}`).join('\n');
+      // 很多表情名只是 emoji_52 这样的编号，靠后台看图写的描述她才知道该用哪个。
+      extras.emojis = this.availableEmojis(guild).slice(0, MAX_EMOJIS).map(e => note(e.id) ? `${e.toString()} — ${note(e.id)}` : e.toString()).join('\n');
     }
     // 贴纸只能用当前服务器自己的（bot 没有 Nitro，不能跨服务器用，私信里也没有服务器贴纸）。
     const stickers = this.availableStickers(guild);
-    if (stickers.length) extras.stickers = stickers.slice(0, 60).map(s => `${s.name}${s.description ? ` — ${s.description}` : ''}${s.tags ? `（${s.tags}）` : ''}`).join('\n');
+    if (stickers.length) {
+      // 关联表情是自定义表情时 Discord 存的是它的 ID，换成名字才有意义；找不到的 ID 丢掉。
+      const tagText = tags => String(tags || '').split(/[,，\s]+/).filter(Boolean)
+        .map(tag => /^\d{15,25}$/.test(tag) ? (guild.emojis?.cache?.get?.(tag) ? `:${guild.emojis.cache.get(tag).name}:` : '') : tag).filter(Boolean).join(' ');
+      extras.stickers = stickers.slice(0, MAX_STICKERS).map(s => {
+        const description = s.description || note(s.id);
+        const tags = tagText(s.tags);
+        return `${s.name}${description ? ` — ${description}` : ''}${tags ? `（${tags}）` : ''}`;
+      }).join('\n');
+    }
     return extras;
   }
 
@@ -307,12 +391,13 @@ export class DiscordBot extends EventEmitter {
     let preview = null;
     let previewText = '';
     let toolLine = '';
+    let injectedCount = 0;
     let lastEdit = 0;
     let editTimer = null;
     const renderPreview = () => {
       const visible = stripReactionTags(previewText);
       const body = visible.length > 1800 ? `…${visible.slice(-1800)}` : visible;
-      return [body, toolLine ? `-# 🔧 ${toolLine}` : ''].filter(Boolean).join('\n') || '-# …';
+      return [body, toolLine ? `-# 🔧 ${toolLine}` : '', injectedCount ? `-# ${INTERJECT_REACTION} 已读到 ${injectedCount} 条补充` : ''].filter(Boolean).join('\n') || '-# …';
     };
     const flushPreview = async () => {
       editTimer = null;
@@ -331,12 +416,17 @@ export class DiscordBot extends EventEmitter {
       if (!this.cfg.streamPreview || editTimer) return;
       editTimer = setTimeout(flushPreview, Math.max(0, 1200 - (Date.now() - lastEdit)));
     };
+    const turn = { authorId: message?.author?.id || interaction?.user?.id };
+    const endTurn = () => { if (this.activeTurns.get(meta.id) === turn) this.activeTurns.delete(meta.id); };
     const hooks = {
       onEvent: event => {
+        if (event.type === 'turn_start') this.activeTurns.set(meta.id, turn);
+        if (event.type === 'turn_end') endTurn();
         if (event.type === 'segment' && previewText && !previewText.endsWith('\n\n')) previewText += '\n\n';
         if (event.type === 'text') { previewText += event.text; schedule(); }
         if (event.type === 'tool_use') { toolLine = toolSummary(event.name, event.input); schedule(); }
         if (event.type === 'tool_result') { toolLine = ''; }
+        if (event.type === 'injected') { injectedCount++; schedule(); }
       },
       onPermission: (request, resolve) => this.askPermission(channel, meta, request, resolve),
     };
@@ -346,12 +436,14 @@ export class DiscordBot extends EventEmitter {
     } catch (error) {
       result = { ok: false, error: error.code === 'cancelled' ? '已取消' : error.message, entry: { text: previewText }, files: error.files || [] };
     } finally {
+      endTurn();
       clearInterval(typingTimer);
       clearTimeout(editTimer);
     }
-    const extracted = extractReactions((result.entry?.text || result.text || '').trim());
+    const lookup = this.emojiLookup(channel?.guild);
+    const extracted = extractReactions((result.entry?.text || result.text || '').trim(), lookup);
     const stickerTags = extractStickers(extracted.text);
-    let finalText = stickerTags.text;
+    let finalText = resolveEmojiNames(stickerTags.text, lookup);
     if (message && this.cfg.reactions !== false) {
       for (const emoji of extracted.reactions) await message.react(emoji).catch(error => this.log(`[discord] 表情反应失败 ${emoji}：${error.message}`));
     }
@@ -580,15 +672,21 @@ ${body}`);
       if (!interaction.channel) return interaction.reply({ content: '无法在这里使用。', flags: MessageFlags.Ephemeral });
       const from = interaction.member?.displayName || interaction.user.globalName || interaction.user.username;
       if (tier === 'guest' && !(await this.checkQuota(interaction.user, from, text => interaction.reply({ content: text, flags: MessageFlags.Ephemeral })))) return;
-      await interaction.deferReply();
       const meta = this.sessionFor(pseudo, tier);
       this.sessions.noteDiscordUser(meta.id, interaction.user.id);
       const via = isDM ? 'discord 私信' : `discord #${interaction.channel.name || interaction.channelId}`;
       const historyEntries = isDM ? [] : this.histories.get(interaction.channelId) || [];
       const channelHistory = isDM ? '' : this.historyBlock(interaction.channelId);
+      const raw = interaction.options.getString('内容', true);
+      this.noteForeignEmojis(raw);
+      const text = this.annotate(raw);
+      if (this.people && !isDM) this.people.observe({ id: interaction.user.id, username: interaction.user.username, displayName: from }, raw, interaction.channel.name || '');
+      if (this.interject(meta, interaction.user.id, { text, from, via, channelHistory })) {
+        this.histories.delete(interaction.channelId);
+        return interaction.reply({ content: `${INTERJECT_REACTION} 她正在做事，这句已经插进当前任务里了，会在这次的回复里一起回应~`, flags: MessageFlags.Ephemeral });
+      }
       this.histories.delete(interaction.channelId);
-      const text = interaction.options.getString('内容', true);
-      if (this.people && !isDM) this.people.observe({ id: interaction.user.id, username: interaction.user.username, displayName: from }, text, interaction.channel.name || '');
+      await interaction.deferReply();
       const extras = this.contextExtras(interaction.guild, { speakerId: interaction.user.id, historyAuthorIds: historyEntries.map(entry => entry.authorId), text: [text, channelHistory].join('\n') });
       return this.runAndReply(null, meta, { text, from, via, channelHistory, ...extras }, interaction);
     }

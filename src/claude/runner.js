@@ -33,6 +33,8 @@ export function buildArgs(turn, systemFile, mcpFile = null) {
     turn.tier === 'guest' ? '--system-prompt-file' : '--append-system-prompt-file', systemFile,
     // 角色卡修改后立刻作用于已有会话，而不是沿用首轮快照。
     '--system-prompt-snapshot', 'off',
+    // 进行中插入的消息靠 command_lifecycle 事件确认是否已被读取，这个开关打开后 CLI 才会输出它。
+    '--replay-user-messages',
   ];
   args.push(...(turn.resume ? ['--resume', turn.claudeSessionId] : ['--session-id', turn.claudeSessionId]));
   if (turn.model) args.push('--model', turn.model);
@@ -52,12 +54,25 @@ export function buildArgs(turn, systemFile, mcpFile = null) {
   return args;
 }
 
+function userContent(text, images = [], documents = []) {
+  // 图片和 PDF 作为内容块直接交给模型（不依赖 Read 工具，访客也能用），放在文字之前。
+  const blocks = [
+    ...images.map(image => ({ type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } })),
+    ...documents.map(doc => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: doc.data }, title: doc.name })),
+  ];
+  return blocks.length ? [...blocks, { type: 'text', text }] : text;
+}
+
 /**
  * 运行一轮 Claude Code。
  * @param {object} turn { claudeSessionId, resume, cwd, system, prompt, model, effort, permissionMode, tier, addDirs, disallowedTools, name }
- * @param {object} io { claudeBin, tmpDir, signal, onEvent(event), canUseTool(request) => Promise<decision> }
+ * @param {object} io { claudeBin, tmpDir, signal, onEvent(event), canUseTool(request) => Promise<decision>, attachInput(inject | null) }
+ *
+ * attachInput 在进程启动后收到 inject({ text, images, documents }) => boolean，用来往进行中的这一轮插话：
+ * Claude Code 会在下一次工具调用结束时把它并入当前任务；如果模型已经在写最后的回复，CLI 会接着为它再跑一轮，
+ * 两轮的输出都算在本轮里。本轮收尾（stdin 关闭）后会收到 attachInput(null)，此时 inject 返回 false。
  */
-export async function runTurn(turn, { claudeBin, tmpDir, signal, onEvent = () => {}, canUseTool, spawnProcess = spawn }) {
+export async function runTurn(turn, { claudeBin, tmpDir, signal, onEvent = () => {}, canUseTool, attachInput = () => {}, spawnProcess = spawn }) {
   await mkdir(tmpDir, { recursive: true });
   const systemFile = path.join(tmpDir, `system-${randomUUID()}.txt`);
   await writeFile(systemFile, turn.system, { encoding: 'utf8', mode: 0o600 });
@@ -73,6 +88,8 @@ export async function runTurn(turn, { claudeBin, tmpDir, signal, onEvent = () =>
   let lines;
   let closed;
   let interruptTimer;
+  let unreadTimer;
+  let inputOpen = false;
   const pendingPermissions = new Map();
   const onAbort = () => {
     // 先请求 CLI 优雅中断（会话记录保持完整），5 秒内没退出再强杀进程树。
@@ -91,22 +108,45 @@ export async function runTurn(turn, { claudeBin, tmpDir, signal, onEvent = () =>
     closed = new Promise(resolve => child.once('close', code => resolve(code)));
     signal?.addEventListener('abort', onAbort, { once: true });
     const send = value => { if (!child.stdin.destroyed && child.stdin.writable) child.stdin.write(JSON.stringify(value) + '\n'); };
-    // 图片和 PDF 作为内容块直接交给模型（不依赖 Read 工具，访客也能用），放在文字之前。
-    const blocks = [
-      ...(turn.images || []).map(image => ({ type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } })),
-      ...(turn.documents || []).map(doc => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: doc.data }, title: doc.name })),
-    ];
-    const content = blocks.length ? [...blocks, { type: 'text', text: turn.prompt }] : turn.prompt;
-    send({ type: 'user', message: { role: 'user', content } });
+    send({ type: 'user', message: { role: 'user', content: userContent(turn.prompt, turn.images, turn.documents) } });
+    // 插话：已写入但 CLI 还没读取的消息 uuid。收到 result 时如果还有没读取的，CLI 会为它们再跑一轮，stdin 要继续开着。
+    const unread = new Set();
+    inputOpen = true;
+    const closeInput = () => {
+      clearTimeout(unreadTimer);
+      if (!inputOpen) return;
+      inputOpen = false;
+      attachInput(null);
+      child.stdin.end();
+    };
+    attachInput(({ text, images = [], documents = [] }) => {
+      if (!inputOpen || signal?.aborted || child.stdin.destroyed || !child.stdin.writable) return false;
+      const uuid = randomUUID();
+      unread.add(uuid);
+      send({ type: 'user', uuid, message: { role: 'user', content: userContent(text, images, documents) } });
+      return true;
+    });
+    const markRead = uuid => {
+      if (!unread.delete(uuid)) return;
+      onEvent({ type: 'injected', uuid });
+    };
     lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
     let result;
     let started = false;
     let streamedText = false;
     const finalTexts = [];
+    let durationMs = 0;
+    let numTurns = 0;
     for await (const line of lines) {
       if (!line.trim()) continue;
+      clearTimeout(unreadTimer);
       let item;
       try { item = JSON.parse(line); } catch { continue; }
+      if (item.type === 'command_lifecycle') {
+        if (item.state !== 'queued') markRead(item.command_uuid);
+        continue;
+      }
+      if (item.type === 'user' && item.isReplay) { markRead(item.uuid); continue; }
       if (item.type === 'control_request' && item.request?.subtype === 'can_use_tool') {
         const request = item.request;
         const controller = new AbortController();
@@ -175,8 +215,12 @@ export async function runTurn(turn, { claudeBin, tmpDir, signal, onEvent = () =>
         }
       } else if (item.type === 'result') {
         result = item;
-        // 结果出来后关闭 stdin，CLI 才会结束进程。
-        child.stdin.end();
+        durationMs += item.duration_ms || 0;
+        numTurns += item.num_turns || 0;
+        // 结果出来后关闭 stdin，CLI 才会结束进程；还有没读取的插话时等它为插话跑完下一轮。
+        if (!unread.size || item.is_error || signal?.aborted) closeInput();
+        // 保险：CLI 本该马上开始处理插话，30 秒内一点输出都没有就不再等。
+        else unreadTimer = setTimeout(closeInput, 30000);
       }
     }
     const code = await closed;
@@ -193,12 +237,15 @@ export async function runTurn(turn, { claudeBin, tmpDir, signal, onEvent = () =>
       ok, started,
       text: typeof result.result === 'string' ? result.result : finalTexts.at(-1) || '',
       error: ok ? '' : (result.api_error_status === 429 ? '触发了额度或速率限制，稍后再试' : `生成失败（${result.subtype || 'error'}）`),
-      usage: result.usage || null, costUsd: result.total_cost_usd ?? null, durationMs: result.duration_ms ?? null,
-      numTurns: result.num_turns ?? null, claudeSessionId: result.session_id, denials: result.permission_denials || [],
+      // total_cost_usd 在同一进程里是累计值，耗时与轮数是每次 result 各算各的。
+      usage: result.usage || null, costUsd: result.total_cost_usd ?? null, durationMs: durationMs || null,
+      numTurns: numTurns || null, claudeSessionId: result.session_id, denials: result.permission_denials || [],
     };
   } finally {
     signal?.removeEventListener('abort', onAbort);
     clearTimeout(interruptTimer);
+    clearTimeout(unreadTimer);
+    if (inputOpen) { inputOpen = false; attachInput(null); }
     for (const controller of pendingPermissions.values()) controller.abort();
     killTree(child);
     lines?.close();

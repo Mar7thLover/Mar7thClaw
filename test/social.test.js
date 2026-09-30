@@ -110,14 +110,15 @@ test('人物记忆：观察、攒够后整理、按发言者/提及/名字激活
   assert.equal(new PeopleMemory({ dataDir: dir, config, claudeBin: 'x' }).list().length, 3);
 });
 
-test('组装与会话：访客规则随 WebSearch 开关变化、人物与表情块进入注入层、访客模型取自策略', async t => {
+test('组装与会话：访客规则随 WebSearch 开关变化、人物块进入注入层、表情目录进入 system 层、访客模型取自策略', async t => {
   const card = normalizeCard(JSON.parse(readFileSync(path.join(here, '..', 'cards', 'march7th.json'), 'utf8')));
   const common = { card, prompt: { worldInfoScanDepth: 4, worldInfoBudgetChars: 6000, worldInfoRecursion: true }, userName: 'u', persona: '', surface: 'discord_group', authorNote: '', recent: [], message: { from: 'u', text: 'hi', via: 'd', time: 't' } };
   const guest = assemblePrompt({ ...common, tier: 'guest', guestWebSearch: true, reactions: true, people: '<person name="A">\n- x\n</person>', emojis: ':mar: → <:mar:1>' });
   assert.match(guest.system, /WebSearch 上网搜索/);
   assert.match(guest.system, /\[\[react:😂\]\]/);
   assert.match(guest.turn, /<people trust="untrusted_summary"/);
-  assert.match(guest.turn, /<server_emojis/);
+  assert.match(guest.system, /<server_emojis note="[^"]+">\n:mar: → <:mar:1>\n<\/server_emojis>/);
+  assert.doesNotMatch(guest.turn, /server_emojis/);
   assert.doesNotMatch(assemblePrompt({ ...common, tier: 'guest', guestWebSearch: false }).system, /WebSearch|react:/);
 
   const dir = tempDir(t);

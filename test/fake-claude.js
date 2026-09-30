@@ -13,6 +13,11 @@ if (mode === 'resume-missing' && args.includes('--resume')) {
 
 const rl = createInterface({ input: process.stdin });
 let waiting = null;
+// 插话：进行中收到的 user 消息先排队（像真 CLI 一样报 queued），由当前这一轮或下一轮读取。
+let running = false;
+const queued = [];
+let onQueued = null;
+let cost = 0;
 rl.on('line', line => {
   const msg = JSON.parse(line);
   if (msg.type === 'control_response') { waiting?.(msg.response); return; }
@@ -22,11 +27,45 @@ rl.on('line', line => {
     return;
   }
   if (msg.type !== 'user') return;
-  run(msg.message.content).catch(error => { process.stderr.write(String(error)); process.exit(2); });
+  if (msg.uuid) out({ type: 'command_lifecycle', command_uuid: msg.uuid, state: 'queued', session_id: sessionId });
+  if (running) { queued.push(msg); onQueued?.(); return; }
+  start(msg);
 });
-rl.on('close', () => process.exit(0));
+let closedInput = false;
+rl.on('close', () => { closedInput = true; if (!running) process.exit(0); });
 
-async function run(prompt) {
+function start(msg) {
+  running = true;
+  run(msg.message.content, msg).then(() => {
+    running = false;
+    if (queued.length) start(queued.shift());
+    else if (closedInput) process.exit(0);
+  }).catch(error => { process.stderr.write(String(error)); process.exit(2); });
+}
+
+const nextQueued = () => queued.length ? Promise.resolve() : new Promise(resolve => { onQueued = resolve; });
+const blockText = content => Array.isArray(content) ? content.filter(b => b.type === 'text').map(b => b.text).join('') : content;
+function consume(msg) {
+  out({ type: 'command_lifecycle', command_uuid: msg.uuid, state: 'started', session_id: sessionId });
+  out({ type: 'user', message: msg.message, uuid: msg.uuid, isReplay: true, session_id: sessionId });
+}
+
+async function run(prompt, msg = {}) {
+  if (msg.uuid) consume(msg);
+  if (mode === 'inject' && !msg.uuid) {
+    // 工具调用期间等来一条插话，在工具结果之后读到它。
+    out({ type: 'system', subtype: 'init', session_id: sessionId, model: 'fake-model', cwd: process.cwd() });
+    out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'sleep' } }] } });
+    await nextQueued();
+    const injected = queued.shift();
+    out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'done', is_error: false }] } });
+    consume(injected);
+    const text = blockText(injected.message.content);
+    out({ type: 'stream_event', event: { type: 'message_start' } });
+    out({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: `读到插话：${/interjection="true"/.test(text) ? 'tagged' : 'raw'}` } } });
+    out({ type: 'result', subtype: 'success', is_error: false, result: '插话已处理', session_id: sessionId, total_cost_usd: cost += 0.01, duration_ms: 5, num_turns: 2, usage: {} });
+    return;
+  }
   out({ type: 'system', subtype: 'init', session_id: sessionId, model: 'fake-model', cwd: process.cwd(), permissionMode: args[args.indexOf('--permission-mode') + 1] });
   if (mode === 'refusal') out({ type: 'system', subtype: 'model_refusal_fallback', trigger: 'refusal', original_model: 'claude-fable-5', fallback_model: 'claude-opus-4-8', api_refusal_category: 'cyber' });
   out({ type: 'stream_event', event: { type: 'message_start' } });
@@ -47,6 +86,8 @@ async function run(prompt) {
     out({ type: 'stream_event', event: { type: 'message_start' } });
     out({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: allowed ? `允许${always ? '(always)' : ''}` : '拒绝' } } });
   }
-  if (mode === 'hang') return; // 等待中断
-  out({ type: 'result', subtype: 'success', is_error: false, result: '最终回复', session_id: sessionId, total_cost_usd: 0.01, duration_ms: 5, num_turns: 1, usage: {} });
+  if (mode === 'hang') return new Promise(() => {}); // 等待中断
+  // late：插话在最后的回复写完之后才到，要等下一轮（同一进程里的第二个 result）才读到。
+  if (mode === 'late' && !msg.uuid) await nextQueued();
+  out({ type: 'result', subtype: 'success', is_error: false, result: msg.uuid ? '第二轮回复' : '最终回复', session_id: sessionId, total_cost_usd: cost += 0.01, duration_ms: 5, num_turns: 1, usage: {} });
 }

@@ -53,6 +53,13 @@ export const DEFAULTS = {
     reactions: true,
     // 允许她用 [[sticker:名字]] 发当前服务器的贴纸。
     stickers: true,
+    // 她在执行任务时，发起人或主人的新消息直接插进当前任务（Claude Code 在下一次工具调用后读到），而不是排队等下一轮。
+    interject: true,
+    // 表情 / 贴纸看图描述：很多表情名只是编号，第一次见到时在后台让模型看图写一句描述，缓存在 data/emoji-notes.json。
+    emojiNotes: {
+      enabled: true,
+      model: 'sonnet',
+    },
     guest: {
       model: 'sonnet',
       effort: '',

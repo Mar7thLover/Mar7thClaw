@@ -227,6 +227,8 @@ export function createServer({ config, sessions, cards, discord, models, schedul
         patch.discord = {};
         if (d.reactions !== undefined) patch.discord.reactions = d.reactions === true;
         if (d.stickers !== undefined) patch.discord.stickers = d.stickers === true;
+        if (d.interject !== undefined) patch.discord.interject = d.interject === true;
+        if (d.emojiNotes?.enabled !== undefined) patch.discord.emojiNotes = { enabled: d.emojiNotes.enabled === true };
         if (d.guest) {
           const g = d.guest;
           const guest = {};

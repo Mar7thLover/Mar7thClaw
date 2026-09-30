@@ -239,7 +239,7 @@
         const src = `/api/uploads/${image.file}?token=${encodeURIComponent(token)}`;
         return el('img', { src, alt: '图片', loading: 'lazy', onclick: () => openLightbox(src) });
       })) : null;
-      return el('div', { class: 'msg user' }, el('div', { class: 'from' }, `${entry.from}${entry.via && entry.via !== 'panel' ? ` · ${entry.via}` : ''}`), images, fileChips(entry.files), onlyImages ? null : body);
+      return el('div', { class: 'msg user' }, el('div', { class: 'from' }, `${entry.from}${entry.via && entry.via !== 'panel' ? ` · ${entry.via}` : ''}${entry.injected ? ' · 插话' : ''}`), images, fileChips(entry.files), onlyImages ? null : body);
     }
     if (entry.kind === 'assistant') return assistantNode(entry, false);
     if (entry.kind === 'divider') return el('div', { class: 'divider' }, entry.text);
@@ -777,6 +777,8 @@
     const c = state.config?.discord || {};
     $('dc-reactions').checked = c.reactions !== false;
     $('dc-stickers').checked = c.stickers !== false;
+    $('dc-interject').checked = c.interject !== false;
+    $('dc-emoji-notes').checked = c.emojiNotes?.enabled !== false;
     $('discord-info').replaceChildren(
       el('div', {}, `状态：${d.state}${d.user ? ` · ${d.user.tag}` : ''}${d.guilds ? ` · ${d.guilds} 个服务器` : ''}`),
       d.error ? el('div', { style: 'color: var(--danger)' }, d.error) : null,
@@ -999,7 +1001,10 @@
   });
 
   $('discord-save').addEventListener('click', async () => {
-    try { state.config = await api('PUT', '/api/config', { discord: { reactions: $('dc-reactions').checked, stickers: $('dc-stickers').checked } }); toast('已保存'); } catch (error) { toast(error.message); }
+    try {
+      state.config = await api('PUT', '/api/config', { discord: { reactions: $('dc-reactions').checked, stickers: $('dc-stickers').checked, interject: $('dc-interject').checked, emojiNotes: { enabled: $('dc-emoji-notes').checked } } });
+      toast('已保存');
+    } catch (error) { toast(error.message); }
   });
 
   $('discord-restart').addEventListener('click', async () => {

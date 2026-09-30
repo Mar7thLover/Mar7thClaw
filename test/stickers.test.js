@@ -32,7 +32,8 @@ test('提示词：有贴纸列表时才说明用法并注入 server_stickers', (
   const base = { card, prompt: { worldInfoScanDepth: 4, worldInfoBudgetChars: 6000, worldInfoRecursion: true }, userName: 'u', persona: '', surface: 'discord_group', tier: 'guest', authorNote: '', recent: [], message: { from: 'u', text: 'hi', via: 'd', time: 't' } };
   const withStickers = assemblePrompt({ ...base, stickers: '三月七比心 — 比心（❤️）' });
   assert.match(withStickers.system, /\[\[sticker:贴纸名\]\]/);
-  assert.match(withStickers.turn, /<server_stickers note="[^"]+">\n三月七比心 — 比心（❤️）\n<\/server_stickers>/);
+  assert.match(withStickers.system, /<server_stickers note="[^"]+">\n三月七比心 — 比心（❤️）\n<\/server_stickers>/);
+  assert.doesNotMatch(withStickers.turn, /server_stickers/);
   const without = assemblePrompt(base);
   assert.doesNotMatch(without.system + without.turn, /sticker/);
 });

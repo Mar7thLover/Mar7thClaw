@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, renameSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { assemblePrompt } from './persona/assembler.js';
+import { assemblePrompt, assembleInterjection } from './persona/assembler.js';
 import { runTurn as defaultRunTurn, RunnerError } from './claude/runner.js';
 import { fileRecord, stageOutgoing, MAX_OUTGOING_FILES } from './attachments.js';
 
@@ -44,6 +44,8 @@ export class SessionManager extends EventEmitter {
     this.sessions = new Map();
     this.queues = new Map();
     this.running = new Map();
+    // 进行中的一轮：{ turnId, input }，input 由运行器提供，用来往这一轮里插话。
+    this.active = new Map();
     this.permissions = new Map();
     // 本轮她用 send_file 交付的文件，回复结束时随回复一起发出。
     this.outbox = new Map();
@@ -318,6 +320,8 @@ export class SessionManager extends EventEmitter {
       emit(event);
     };
     this.outbox.set(id, []);
+    const active = { turnId, input: null };
+    this.active.set(id, active);
     emit({ type: 'turn_start' });
     try {
       let result;
@@ -336,6 +340,7 @@ export class SessionManager extends EventEmitter {
           }, {
             claudeBin: this.config.claudeBin, tmpDir: this.tmpDir, signal, onEvent,
             canUseTool: (request, requestSignal) => this.requestPermission(id, request, requestSignal, hooks),
+            attachInput: input => { active.input = input; },
           });
           break;
         } catch (error) {
@@ -370,9 +375,38 @@ export class SessionManager extends EventEmitter {
       error.files = outgoing;
       throw error;
     } finally {
+      if (this.active.get(id) === active) this.active.delete(id);
       this.outbox.delete(id);
       this.semaphore.release();
     }
+  }
+
+  // 当前这一轮是否还能插话（进程已启动、还没收尾）。
+  canInject(id) {
+    return Boolean(this.active.get(id)?.input);
+  }
+
+  /**
+   * 往进行中的这一轮插话：不排队、不另起一轮，她会在下一次工具调用结束时读到，最终回复一并回应。
+   * 返回 false 表示这一轮已经收尾（或还没启动），调用方应改用 send 排队。
+   */
+  inject(id, message) {
+    const meta = this.get(id);
+    const active = this.active.get(id);
+    if (!active?.input) return false;
+    if (!message?.text?.trim() && !message?.images?.length && !message?.files?.length) throw Object.assign(new Error('消息不能为空'), { status: 400 });
+    const text = message.text?.trim() ? message.text : '（发来了附件）';
+    const prompt = assembleInterjection({
+      userName: meta.userName, surface: meta.surface,
+      message: { from: message.from || meta.userName, text, via: message.via || meta.surface, time: nowText(), images: message.images?.length || 0, files: message.files || [] },
+      channelHistory: message.channelHistory || '', replyTo: message.replyTo || null,
+    });
+    const ok = active.input({ text: prompt, images: (message.images || []).map(image => ({ mediaType: image.mediaType, data: image.data })), documents: message.documents || [] });
+    if (!ok) return false;
+    const images = (message.images || []).map(image => ({ file: image.file, mediaType: image.mediaType, width: image.width, height: image.height }));
+    const files = (message.files || []).map(fileRecord);
+    this.append(id, { kind: 'user', turnId: active.turnId, injected: true, from: message.from || meta.userName, via: message.via || meta.surface, text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) });
+    return true;
   }
 
   takeOutbox(id) {

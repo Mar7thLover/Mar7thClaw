@@ -4,14 +4,16 @@ import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
-// 一次性的后台小任务（如整理人物档案）：无工具、安全模式、不保存会话，stdin 传入提示词。
-export async function runOneShot({ claudeBin, tmpDir, prompt, system = '', model = 'haiku', timeoutMs = 120000, spawnProcess = spawn }) {
+// 一次性的后台小任务（如整理人物档案、描述表情）：无工具、安全模式、不保存会话，stdin 传入提示词。
+// content 是内容块数组（可以夹带图片）时改用 stream-json 输入，否则直接传纯文本 prompt。
+export async function runOneShot({ claudeBin, tmpDir, prompt, content = null, system = '', model = 'haiku', timeoutMs = 120000, spawnProcess = spawn }) {
   const dir = path.join(tmpDir, `oneshot-${randomUUID()}`);
   await mkdir(dir, { recursive: true });
   const env = { ...process.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' };
   delete env.CLAUDECODE;
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--safe-mode', '--tools', '', '--strict-mcp-config',
     '--no-session-persistence', '--disable-slash-commands', '--permission-mode', 'dontAsk'];
+  if (content) args.push('--input-format', 'stream-json');
   if (model) args.push('--model', model);
   if (system) args.push('--system-prompt', system);
   let child;
@@ -22,9 +24,13 @@ export async function runOneShot({ claudeBin, tmpDir, prompt, system = '', model
     const timer = setTimeout(() => child.kill(), timeoutMs);
     let result = null;
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    child.stdin.end(prompt, 'utf8');
+    if (content) child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n', 'utf8');
+    else child.stdin.end(prompt, 'utf8');
     for await (const line of lines) {
-      try { const item = JSON.parse(line); if (item.type === 'result') result = item; } catch { /* 忽略非 JSON 行 */ }
+      try {
+        const item = JSON.parse(line);
+        if (item.type === 'result') { result = item; child.stdin.end(); }
+      } catch { /* 忽略非 JSON 行 */ }
     }
     await closed;
     clearTimeout(timer);

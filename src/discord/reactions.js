@@ -16,14 +16,37 @@ export function isReactionEmoji(value) {
   return CUSTOM.test(text) || (UNICODE.test(text) && /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(text));
 }
 
-export function extractReactions(text) {
+// lookup(name) 把服务器表情名换成完整标签，让 [[react::name:]] / [[react:name]] 也能用。
+export function extractReactions(text, lookup = () => null) {
   const reactions = [];
   const cleaned = String(text || '').replace(TAG, (_, emoji) => {
-    const value = emoji.trim();
+    let value = emoji.trim();
+    if (!isReactionEmoji(value)) value = lookup(value.replace(/^:(.+):$/, '$1')) || value;
     if (isReactionEmoji(value) && !reactions.includes(value) && reactions.length < MAX_REACTIONS) reactions.push(value);
     return '';
   });
   return { text: tidy(cleaned), reactions };
+}
+
+const CUSTOM_IN_TEXT = /<(a?):([\w~]{2,32}):(\d{15,25})>/g;
+
+// 对方消息里的自定义表情附上画面描述：<:emoji_52:123> → <:emoji_52:123>（表情：流萤捂脸害羞）。
+export function annotateEmojis(text, noteFor) {
+  return String(text || '').replace(CUSTOM_IN_TEXT, (tag, _animated, _name, id) => {
+    const note = noteFor(id);
+    return note ? `${tag}（表情：${note}）` : tag;
+  });
+}
+
+// 所有自定义表情引用：{ id, name, animated }，用来把陌生表情（其他服务器的）也排进描述队列。
+export function customEmojisIn(text) {
+  return [...String(text || '').matchAll(CUSTOM_IN_TEXT)].map(([, animated, name, id]) => ({ id, name, animated: animated === 'a' }));
+}
+
+// 回复正文里的 :名字: 换成服务器表情标签（代码块和行内代码里的不动，已经是完整标签的不动）。
+export function resolveEmojiNames(text, lookup) {
+  return String(text || '').split(/(```[\s\S]*?```|`[^`\n]*`)/).map((part, index) => index % 2 ? part
+    : part.replace(/(?<![<\w]|<a):([\w~]{2,32}):(?!\d)/g, (raw, name) => lookup(name) || raw)).join('');
 }
 
 export function extractStickers(text) {
