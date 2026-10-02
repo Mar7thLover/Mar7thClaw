@@ -394,23 +394,30 @@ export class DiscordBot extends EventEmitter {
     let injectedCount = 0;
     let lastEdit = 0;
     let editTimer = null;
+    // 预览的发送和编辑串成一条链：前一次请求还没返回时 preview 仍是 null，并发执行会多发一条预览；
+    // 本轮结束时先关掉预览，再等链上已发出的请求落地，最终回复才能接管（或删掉）那条预览。
+    let previewChain = Promise.resolve();
+    let previewClosed = false;
     const renderPreview = () => {
       const visible = stripReactionTags(previewText);
       const body = visible.length > 1800 ? `…${visible.slice(-1800)}` : visible;
       return [body, toolLine ? `-# 🔧 ${toolLine}` : '', injectedCount ? `-# ${INTERJECT_REACTION} 已读到 ${injectedCount} 条补充` : ''].filter(Boolean).join('\n') || '-# …';
     };
-    const flushPreview = async () => {
+    const flushPreview = () => {
       editTimer = null;
-      lastEdit = Date.now();
-      const content = renderPreview();
-      try {
-        if (!preview) {
-          if (stripReactionTags(previewText).length < 30 && !toolLine) return;
-          preview = interaction
-            ? await interaction.editReply({ content, allowedMentions: { parse: [] } })
-            : await message.reply({ content, allowedMentions: { parse: [], repliedUser: false }, flags: MessageFlags.SuppressEmbeds });
-        } else await preview.edit({ content, allowedMentions: { parse: [] } });
-      } catch { /* 预览失败不影响最终回复 */ }
+      previewChain = previewChain.then(async () => {
+        if (previewClosed) return;
+        lastEdit = Date.now();
+        const content = renderPreview();
+        try {
+          if (!preview) {
+            if (stripReactionTags(previewText).length < 30 && !toolLine) return;
+            preview = interaction
+              ? await interaction.editReply({ content, allowedMentions: { parse: [] } })
+              : await message.reply({ content, allowedMentions: { parse: [], repliedUser: false }, flags: MessageFlags.SuppressEmbeds });
+          } else await preview.edit({ content, allowedMentions: { parse: [] } });
+        } catch { /* 预览失败不影响最终回复 */ }
+      });
     };
     const schedule = () => {
       if (!this.cfg.streamPreview || editTimer) return;
@@ -439,6 +446,8 @@ export class DiscordBot extends EventEmitter {
       endTurn();
       clearInterval(typingTimer);
       clearTimeout(editTimer);
+      previewClosed = true;
+      await previewChain;
     }
     const lookup = this.emojiLookup(channel?.guild);
     const extracted = extractReactions((result.entry?.text || result.text || '').trim(), lookup);
