@@ -66,7 +66,7 @@ Discord (src/discord/) ───────────────┤
 
 | 层 | 发送方式 | 内容 |
 | --- | --- | --- |
-| system 层 | 主人会话用 `--append-system-prompt-file` 追加在 Claude Code 默认系统提示之后，工具能力不受影响；访客会话用 `--system-prompt-file` 整个替换掉默认系统提示 | 主提示 / 卡片 `system_prompt`（支持 `{{original}}`）、Claw 规则、界面规则、常驻世界书（角色前/后、示例前/后）、用户 Persona、description、personality、scenario、示例对话 |
+| system 层 | 主人会话用 `--append-system-prompt-file` 追加在 Claude Code 默认系统提示之后，工具能力不受影响；访客会话用 `--system-prompt-file` 整个替换掉默认系统提示，走 API 时直接作为请求的 `system` | 主提示 / 卡片 `system_prompt`（支持 `{{original}}`）、Claw 规则、界面规则、常驻世界书（角色前/后、示例前/后）、用户 Persona、description、personality、scenario、示例对话 |
 | 逐轮注入层 | 放在每轮的用户消息里 | 首轮开场白、关键词触发的世界书、Discord 频道记录与引用（标记为不可信）、深度提示（卡片 `depth_prompt` 与「指定深度」词条）、作者注释、实际消息、`post_history_instructions` |
 
 - 会话历史由 Claude Code 持有，所以"深度"只能相对本轮消息来定位：深度 ≥1 的放在消息之前，深度 0 的放在消息之后，后置指令永远在最后。不管会话里堆了多少工具输出，人设提醒都贴近生成位置。
@@ -83,7 +83,7 @@ Discord (src/discord/) ───────────────┤
 
 - 面板和主人的会话默认用 `auto` 模式：Claude Code 的分类器直接放行安全操作，有风险的转给你审批。面板上会弹审批卡片（Discord 里是按钮，只有主人能点），选项有允许 / 本会话都允许 / 拒绝；10 分钟无人处理自动拒绝。每个会话都可以改成 `default` / `acceptEdits` / `plan` / `bypassPermissions`。
 - 无人值守时用不上的工具默认禁用：`AskUserQuestion`、`EnterPlanMode`、`ExitPlanMode`。
-- Discord 访客（不在 owners 里的人）的会话仅限聊天：`--tools "" --safe-mode --strict-mcp-config`，不加载本机的 CLAUDE.md、技能和 MCP，也不能提升权限模式。
+- Discord 访客（不在 owners 里的人）仅限聊天：经由 Claude Code 时以 `--tools "" --safe-mode --strict-mcp-config` 运行（最多开放 WebSearch），打开 API 调用方式后不启动 Claude Code，两种情况都碰不到本机的文件、CLAUDE.md、技能和 MCP，也不能提升权限模式。和主人共用频道对话时，访客那一轮同样以这套受限参数续接主人的会话，工具请求一律拒绝，访客的话也不会插进主人正在进行的那一轮。
 
 ## 模型
 
@@ -135,7 +135,7 @@ Claude Code 自带的 Cron 工具只在常驻的交互会话里生效，而 Claw
 - `ignoreOtherMentions`、频道历史（自上次回复以来别人说的话，最多 `historyLimit` 条；重启后首次回复前会从 Discord 补拉）。
 - 输入中提示、流式预览（发出后反复编辑）、2000 字符 / 17 行分块（代码块在块之间自动闭合并重开）。
 - 附件：图片、文本、PDF 所有人都能让她读；主人发来的附件另存到会话工作目录的 `.claw-attachments/`。她也能把文件作为附件发回来，详见「附件」。
-- 会话划分：频道 × 身份（主人 / 访客各一个会话），私信按用户划分。
+- 会话划分：默认按频道 × 身份（主人 / 访客各一个会话），打开「访客和主人共用对话」后每个频道只有一个会话；私信按用户划分。
 - 斜杠命令：`/ask` `/new` `/stop` `/status` `/model` `/mode` `/note`。定义有变化时才重新注册。
 
 同一个令牌不要同时跑 OpenClaw 和 Mar7thClaw，否则会重复回复。
@@ -217,8 +217,16 @@ Claude Code 自带的 Cron 工具只在常驻的交互会话里生效，而 Claw
 
 ### 访客策略（设置 → 访客）
 
-- **模型与强度**：单独设置，默认 sonnet，和主人会话用的模型无关。
-- **工具**：只有 WebSearch 可以开放，可以关掉。其他工具一律不给，特别是能访问内网（包括 Claw 自己的接口）的 WebFetch。访客会话以 `--safe-mode --permission-mode dontAsk` 运行，不加载本机的 CLAUDE.md、技能、MCP 和记忆，也不带 Claude Code 的默认系统提示（只发角色提示词）。
+- **模型与强度**：单独设置，默认 sonnet，和主人会话用的模型无关。共用对话里也只作用于访客那几轮。
+- **对话划分**（`discord.guest.sharedSession`，默认关）：关闭时访客在每个频道有自己的会话，看不到主人那边的上下文。打开后访客并入频道里主人的会话，双方能接上彼此的话题；访客那一轮仍以受限参数运行 Claude Code，系统提示里另外要求她不要把替主人查看过的文件内容、命令输出转述给访客。但这段对话里之前的内容对访客那一轮是可见的，有私密内容的频道不要打开。共用对话里访客不能用 `/new` 和 `/stop`，消息里的附件仍按访客处理（不另存到工作目录）。私信始终是单独的对话。
+- **调用方式**（`discord.guest.useApi`，默认关）：访客单独的对话（包括私信）默认经由 Claude Code，以 `--safe-mode --permission-mode dontAsk` 运行，不加载本机的 CLAUDE.md、技能、MCP 和记忆，也不带 Claude Code 的默认系统提示（只发角色提示词）。打开后改为直接调用 Anthropic Messages API（`src/claude/api-runner.js`，官方 `@anthropic-ai/sdk`），按量计费，不占用主人的 Claude Code 订阅；共用对话的历史在 Claude Code 里，所以这个开关对共用对话不起作用。两种方式的历史互不相通，切换后已有的访客对话会开新对话。
+- **API 方式的细节**：
+  - API Key 在「访客」页填写（存在 `data/config.json` 的 `anthropic.apiKey`），留空则用 `ANTHROPIC_API_KEY` 环境变量或 `ant auth login` 的登录信息。不要把 `ANTHROPIC_API_KEY` 设成全局环境变量，否则主人会话里的 Claude Code 也会改用它计费。
+  - 对话历史按会话存在 `data/api-history/<会话 ID>.json`，只追加不改写（思考块、搜索结果原样回传）；`/new` 或删除会话时一并清掉。接近上下文上限时由 API 服务端压缩（`compact-2026-01-12`）。系统提示每轮以自动缓存发送。
+  - Fable 5.1 / Opus 5.5 / Opus 5 / Sonnet 5.5 带 `fallbacks: "default"`，拒答时服务端按类别换模型重试，聊天记录里留下提示；整条链都拒答时这一轮不写入历史。角色卡改动后旧的思考块由 API 丢弃（`drop_block`），不会让请求报错。
+  - 一次请求不能中途插入消息，访客在她回复时发的新消息排到下一轮。
+  - 费用按模型价格和 `usage` 估算，记在会话统计里（与账单可能略有出入）。
+- **工具**：只有联网搜索可以开放（经由 Claude Code 时是 WebSearch，走 API 时是服务端的 `web_search`，每轮最多 5 次），可以关掉。其他工具一律不给，特别是能访问内网（包括 Claw 自己的接口）的 WebFetch。
 - **次数**：每人上限可按天、周、月或总数计算，也可以给单个用户单独设上限（0 表示禁止）。用完时她回复一句提示，同一周期内之后只加 ⏳ 反应。`/status` 可以查看剩余次数。
 - **身份组**：勾选的身份组成员，可以在服务器原有的 users/roles 名单之外以访客身份使用。主人不受名单限制。
 
@@ -244,7 +252,7 @@ Claude Code 会话和工作目录绑定（`--resume` 必须在同一个目录下
 ## 测试
 
 ```powershell
-npm test      # 66 项，不调用真实模型：宏、角色卡与 PNG、世界书、组装、门控、分块、运行器协议（模拟 CLI）、会话、HTTP、模型目录、cron 与调度器、MCP 服务、表情反应、访客额度、人物记忆、图片处理、附件收发、贴纸、插话、表情描述
+npm test      # 75 项，不调用真实模型：宏、角色卡与 PNG、世界书、组装、门控、分块、运行器协议（模拟 CLI）、会话、HTTP、模型目录、cron 与调度器、MCP 服务、表情反应、访客额度、人物记忆、图片处理、附件收发、贴纸、插话、表情描述、访客 API 与共用对话
 ```
 
 ## 免责声明

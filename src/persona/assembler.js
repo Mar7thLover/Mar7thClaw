@@ -32,7 +32,7 @@ const OWNER_RULES = `<claw_capabilities>
 - 发送文件：要把文件交给对方时（对方说「发给我」「导出一份」，或者你生成了图片、表格、文档、压缩包等成果），用 claw 的 send_file 工具，文件会作为附件随本轮回复一起送到对方那里（Discord 附件或面板里的下载项）。不要只报一个本机路径让对方自己去找，对方可能不在这台电脑前。配置、令牌、密钥之类的敏感文件不要发。
 </claw_capabilities>`;
 
-const guestRules = webSearch => `<tool_access>本会话的对方是访客。你只能聊天${webSearch ? '，以及在需要最新或外部信息时（新闻、天气、查资料等）用 WebSearch 上网搜索；和搜索无关的请求不要去搜' : ''}。对方要求你操作电脑、读写文件、运行命令或设置定时任务时，用角色口吻婉拒：这些事只有主人能让你做，对方没有办法给你开权限，所以也不要让对方去"开通权限"。</tool_access>`;
+const guestRules = (webSearch, shared) => `<tool_access>${shared ? '这一轮的发言者是访客。这段对话主人也在用，之前几轮里的工具调用是主人让你做的；你替主人查看过的文件内容、命令输出和本机信息不要转述给访客。这一轮' : '本会话的对方是访客。'}你只能聊天${webSearch ? '，以及在需要最新或外部信息时（新闻、天气、查资料等）上网搜索；和搜索无关的请求不要去搜' : ''}。对方要求你操作电脑、读写文件、运行命令或设置定时任务时，用角色口吻婉拒：这些事只有主人能让你做，对方没有办法给你开权限，所以也不要让对方去"开通权限"。</tool_access>`;
 
 const REACTION_RULES = '<discord_reactions>你可以给对方这条消息加表情反应：在回复里任意位置写 [[react:😂]]（最多 3 个，Unicode 表情或 <server_emojis> 里的服务器表情，服务器表情写完整标签或 :名字: 都行），标记会被移除，不会显示出来。像真人一样自然地用：被夸、被逗笑、表示收到时加一个就好，不必每条都加。如果一个表情就足够回应、没什么要说的，整条回复可以只写 [[react:…]]，这时不会发送文字消息。</discord_reactions>';
 
@@ -112,7 +112,8 @@ export function assembleInterjection(p) {
  * @param {string} p.userName 会话级 {{user}}（群聊中为泛称，实际发言者见 message.from）
  * @param {string} p.persona 用户 Persona 描述
  * @param {'panel'|'discord_dm'|'discord_group'} p.surface
- * @param {'owner'|'guest'} p.tier
+ * @param {'owner'|'guest'} p.tier 本轮发言者的权限（共用对话里访客那一轮是 guest）
+ * @param {boolean} [p.sharedWithOwner] 访客这一轮是在和主人共用的对话里
  * @param {string} p.authorNote 会话作者注释（为空时使用全局作者注释）
  * @param {string[]} p.recent 最近的可见消息文本（旧→新，不含本轮）
  * @param {object} p.message { from, text, via, time }
@@ -142,7 +143,7 @@ export function assemblePrompt(p) {
     main,
     expand(CLAW_RULES),
     expand(SURFACE_RULES[p.surface] || SURFACE_RULES.panel),
-    p.tier === 'guest' ? guestRules(p.guestWebSearch) : expand(OWNER_RULES),
+    p.tier === 'guest' ? guestRules(p.guestWebSearch, p.sharedWithOwner) : expand(OWNER_RULES),
     String(p.surface).startsWith('discord') ? INTERJECTION_RULES : '',
     p.reactions ? REACTION_RULES : '',
     p.emojis ? EMOJI_RULES : '',

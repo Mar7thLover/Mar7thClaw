@@ -239,7 +239,7 @@
         const src = `/api/uploads/${image.file}?token=${encodeURIComponent(token)}`;
         return el('img', { src, alt: '图片', loading: 'lazy', onclick: () => openLightbox(src) });
       })) : null;
-      return el('div', { class: 'msg user' }, el('div', { class: 'from' }, `${entry.from}${entry.via && entry.via !== 'panel' ? ` · ${entry.via}` : ''}${entry.injected ? ' · 插话' : ''}`), images, fileChips(entry.files), onlyImages ? null : body);
+      return el('div', { class: 'msg user' }, el('div', { class: 'from' }, `${entry.from}${entry.via && entry.via !== 'panel' ? ` · ${entry.via}` : ''}${entry.tier === 'guest' ? ' · 访客' : ''}${entry.injected ? ' · 插话' : ''}`), images, fileChips(entry.files), onlyImages ? null : body);
     }
     if (entry.kind === 'assistant') return assistantNode(entry, false);
     if (entry.kind === 'divider') return el('div', { class: 'divider' }, entry.text);
@@ -888,12 +888,24 @@
   }
   $('gs-model').addEventListener('change', () => fillEffortInto($('gs-effort'), $('gs-model').value, $('gs-effort').value));
 
+  // API Key 只在访客走 API 时用得到。
+  function syncApiFields() {
+    for (const id of ['gs-apikey', 'gs-baseurl']) $(id).disabled = !$('gs-useapi').checked;
+  }
+  $('gs-useapi').addEventListener('change', syncApiFields);
+
   let guestUserLimits = {};
   async function loadGuest() {
     const g = state.config.discord.guest;
     fillModelSelect($('gs-model'), g.model || '');
     fillEffortInto($('gs-effort'), g.model || '', g.effort || '');
     $('gs-websearch').checked = g.webSearch !== false;
+    $('gs-shared').checked = g.sharedSession === true;
+    $('gs-useapi').checked = g.useApi === true;
+    syncApiFields();
+    $('gs-apikey').value = '';
+    $('gs-apikey').placeholder = state.config.anthropic?.apiKey || '留空则用 ANTHROPIC_API_KEY 环境变量';
+    $('gs-baseurl').value = state.config.anthropic?.baseUrl || '';
     $('gs-limit').value = g.quota.limit;
     $('gs-period').value = g.quota.period;
     guestUserLimits = { ...(g.userLimits || {}) };
@@ -934,8 +946,11 @@
       const roles = [...document.querySelectorAll('#gs-roles input:checked')].map(i => i.value);
       const saved = await api('PUT', '/api/config', { discord: { guest: {
         model: $('gs-model').value, effort: $('gs-effort').value, webSearch: $('gs-websearch').checked,
+        sharedSession: $('gs-shared').checked, useApi: $('gs-useapi').checked,
         quota: { limit: Number($('gs-limit').value || 0), period: $('gs-period').value }, roles, userLimits: guestUserLimits,
-      } } });
+      } }, anthropic: { apiKey: $('gs-apikey').value, baseUrl: $('gs-baseurl').value } });
+      $('gs-apikey').value = '';
+      $('gs-apikey').placeholder = saved.anthropic?.apiKey || '留空则用 ANTHROPIC_API_KEY 环境变量';
       state.config = saved;
       toast('访客设置已保存');
       loadGuestUsage();

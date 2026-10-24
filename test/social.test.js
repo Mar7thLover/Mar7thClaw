@@ -114,12 +114,12 @@ test('组装与会话：访客规则随 WebSearch 开关变化、人物块进入
   const card = normalizeCard(JSON.parse(readFileSync(path.join(here, '..', 'cards', 'march7th.json'), 'utf8')));
   const common = { card, prompt: { worldInfoScanDepth: 4, worldInfoBudgetChars: 6000, worldInfoRecursion: true }, userName: 'u', persona: '', surface: 'discord_group', authorNote: '', recent: [], message: { from: 'u', text: 'hi', via: 'd', time: 't' } };
   const guest = assemblePrompt({ ...common, tier: 'guest', guestWebSearch: true, reactions: true, people: '<person name="A">\n- x\n</person>', emojis: ':mar: → <:mar:1>' });
-  assert.match(guest.system, /WebSearch 上网搜索/);
+  assert.match(guest.system, /上网搜索/);
   assert.match(guest.system, /\[\[react:😂\]\]/);
   assert.match(guest.turn, /<people trust="untrusted_summary"/);
   assert.match(guest.system, /<server_emojis note="[^"]+">\n:mar: → <:mar:1>\n<\/server_emojis>/);
   assert.doesNotMatch(guest.turn, /server_emojis/);
-  assert.doesNotMatch(assemblePrompt({ ...common, tier: 'guest', guestWebSearch: false }).system, /WebSearch|react:/);
+  assert.doesNotMatch(assemblePrompt({ ...common, tier: 'guest', guestWebSearch: false }).system, /上网搜索|react:/);
 
   const dir = tempDir(t);
   const config = merge(DEFAULTS, { agent: { cwd: path.join(dir, 'ws') }, discord: { guest: { model: 'claude-opus-4-5-20251101', effort: 'high', webSearch: false } } });
@@ -129,6 +129,9 @@ test('组装与会话：访客规则随 WebSearch 开关变化、人物块进入
   assert.deepEqual(sessions.runtimeFor(meta), { model: 'claude-opus-4-5-20251101', effort: '', permissionMode: 'dontAsk', guestTools: [] });
   config.discord.guest = { ...config.discord.guest, model: '', effort: 'high', webSearch: true };
   assert.deepEqual(sessions.runtimeFor(meta), { model: '', effort: 'high', permissionMode: 'dontAsk', guestTools: ['WebSearch'] });
+  // 走 API 时空模型落到 API 的默认模型 ID。
+  config.discord.guest.useApi = true;
+  assert.equal(sessions.runtimeFor(meta).model, 'claude-opus-5-5');
   const owner = sessions.create({ model: 'opus', effort: 'max' });
   assert.equal(sessions.runtimeFor(owner).model, 'opus');
 });

@@ -211,15 +211,25 @@ export class DiscordBot extends EventEmitter {
     };
   }
 
+  // 默认同一频道里主人与访客分成两个会话：访客会话没有工具，也不会继承主人会话里的文件内容。
+  // 打开 guest.sharedSession 后访客并入主人那个会话（会话本身是主人级，访客那一轮由 SessionManager 按访客权限运行）。
+  sessionTier(isDM, tier) {
+    return !isDM && tier === 'guest' && this.cfg.guest?.sharedSession ? 'owner' : tier;
+  }
+
+  sessionKey(isDM, channelId, userId, tier) {
+    return isDM ? `discord:dm:${userId}` : `discord:channel:${channelId}:${this.sessionTier(isDM, tier)}`;
+  }
+
   sessionFor(message, tier) {
     const isDM = !message.guildId;
-    // 同一频道里主人与访客分成两个会话：访客会话没有工具，也不会继承主人会话里的文件内容。
-    const key = isDM ? `discord:dm:${message.author.id}` : `discord:channel:${message.channelId}:${tier}`;
+    const sessionTier = this.sessionTier(isDM, tier);
+    const key = this.sessionKey(isDM, message.channelId, message.author.id, tier);
     const existing = this.sessions.findByKey(key);
     if (existing) return existing;
-    const label = isDM ? `DM · ${displayName(message)}` : `#${message.channel.name || message.channelId}${tier === 'guest' ? ' · 访客' : ''}`;
+    const label = isDM ? `DM · ${displayName(message)}` : `#${message.channel.name || message.channelId}${sessionTier === 'guest' ? ' · 访客' : ''}`;
     return this.sessions.create({
-      key, title: label, origin: 'discord', surface: isDM ? 'discord_dm' : 'discord_group', tier,
+      key, title: label, origin: 'discord', surface: isDM ? 'discord_dm' : 'discord_group', tier: sessionTier,
       userName: isDM ? displayName(message) : '开拓者',
       discord: { channelId: message.channelId, guildId: message.guildId || null, dm: isDM, label },
     });
@@ -236,12 +246,13 @@ export class DiscordBot extends EventEmitter {
    * 处理附件（含被回复消息里的附件）：
    * - 图片以图片内容块、PDF 以文档块直接交给模型，文本类文件解码后内联，所有人都能用；
    * - 主人的附件另存到会话工作目录，其他格式由她用工具处理；访客的其他格式只保留占位符，也不下载。
+   * tier 是发言者的权限：共用对话里会话是主人级，但访客的附件仍按访客处理。
    */
-  async processAttachments(message, meta, referenced = null) {
+  async processAttachments(message, meta, referenced = null, tier = meta.tier) {
     const notes = [];
     const imageItems = [];
     const fileItems = [];
-    const owner = meta.tier === 'owner';
+    const owner = tier === 'owner' && meta.tier === 'owner';
     const sources = [...message.attachments.values()].map(a => ({ a, fromReply: false }));
     if (referenced) sources.push(...[...referenced.attachments.values()].map(a => ({ a, fromReply: true })));
     const ownerDir = path.join(meta.cwd, '.claw-attachments');
@@ -300,7 +311,8 @@ export class DiscordBot extends EventEmitter {
     }
     this.noteForeignEmojis(message.content);
     const typingEarly = message.attachments.size || referenced?.attachments?.size ? message.channel.sendTyping().catch(() => {}) : null;
-    const { notes, images, files, documents } = await this.processAttachments(message, meta, referenced);
+    const tier = verdict.tier;
+    const { notes, images, files, documents } = await this.processAttachments(message, meta, referenced, tier);
     await typingEarly;
     const text = [this.annotate(stripBotMention(message.content, this.client.user.id)), notes].filter(Boolean).join('\n');
     if (!text.trim() && !images.length && !files.length) return;
@@ -308,7 +320,7 @@ export class DiscordBot extends EventEmitter {
     const channelHistory = !message.guildId ? '' : this.historyBlock(message.channelId);
     const via = !message.guildId ? 'discord 私信' : `discord #${message.channel.name || message.channelId}`;
     // 她正在忙这个会话里的任务：发起人（或主人）的新消息直接插进去，而不是排队等下一轮。
-    if (this.interject(meta, message.author.id, { text, images, files, documents, from: displayName(message), via, channelHistory, replyTo })) {
+    if (this.interject(meta, message.author.id, { text, images, files, documents, from: displayName(message), via, channelHistory, replyTo, tier })) {
       this.histories.delete(message.channelId);
       await message.react(INTERJECT_REACTION).catch(() => {});
       return;
@@ -320,7 +332,7 @@ export class DiscordBot extends EventEmitter {
       historyAuthorIds: historyEntries.map(entry => entry.authorId),
       text: [text, replyTo?.text || '', channelHistory].join('\n'),
     });
-    await this.runAndReply(message, meta, { text, images, files, documents, from: displayName(message), via, channelHistory, replyTo, ...extras });
+    await this.runAndReply(message, meta, { text, images, files, documents, from: displayName(message), via, channelHistory, replyTo, tier, ...extras });
   }
 
   /**
@@ -674,7 +686,7 @@ ${body}`);
     }, this.cfg, this.patterns);
     if (!verdict.accept) return interaction.reply({ content: '这里还没有开放给你哦。', flags: MessageFlags.Ephemeral });
     const tier = verdict.tier;
-    const key = isDM ? `discord:dm:${interaction.user.id}` : `discord:channel:${interaction.channelId}:${tier}`;
+    const key = this.sessionKey(isDM, interaction.channelId, interaction.user.id, tier);
     const pseudo = { channel: interaction.channel, channelId: interaction.channelId, guildId: interaction.guildId, author: interaction.user, member: interaction.member, id: interaction.id };
     const name = interaction.commandName;
     if (name === 'ask') {
@@ -690,16 +702,20 @@ ${body}`);
       this.noteForeignEmojis(raw);
       const text = this.annotate(raw);
       if (this.people && !isDM) this.people.observe({ id: interaction.user.id, username: interaction.user.username, displayName: from }, raw, interaction.channel.name || '');
-      if (this.interject(meta, interaction.user.id, { text, from, via, channelHistory })) {
+      if (this.interject(meta, interaction.user.id, { text, from, via, channelHistory, tier })) {
         this.histories.delete(interaction.channelId);
         return interaction.reply({ content: `${INTERJECT_REACTION} 她正在做事，这句已经插进当前任务里了，会在这次的回复里一起回应~`, flags: MessageFlags.Ephemeral });
       }
       this.histories.delete(interaction.channelId);
       await interaction.deferReply();
       const extras = this.contextExtras(interaction.guild, { speakerId: interaction.user.id, historyAuthorIds: historyEntries.map(entry => entry.authorId), text: [text, channelHistory].join('\n') });
-      return this.runAndReply(null, meta, { text, from, via, channelHistory, ...extras }, interaction);
+      return this.runAndReply(null, meta, { text, from, via, channelHistory, tier, ...extras }, interaction);
     }
     const meta = this.sessions.findByKey(key);
+    // 共用对话里访客不能清空或打断主人的上下文和任务。
+    if (['new', 'stop'].includes(name) && tier === 'guest' && meta?.tier === 'owner') {
+      return interaction.reply({ content: '这里是和主人共用的对话，只有主人能用这个命令哦。', flags: MessageFlags.Ephemeral });
+    }
     if (name === 'new') {
       if (meta) this.sessions.reset(meta.id);
       return interaction.reply({ content: meta ? '好啦，重新开始~ 之前的话咱就当没听过啦！' : '这里还没有对话，直接叫我就好~', flags: MessageFlags.Ephemeral });
@@ -712,12 +728,13 @@ ${body}`);
       if (tier === 'guest' && this.guestUsage) {
         const usage = this.guestUsage.status(interaction.user.id);
         const policy = this.cfg.guest;
-        return interaction.reply({ content: `你是访客：${usage.periodName}已用 ${usage.used}/${usage.limit} 次 · 模型 \`${policy.model || '默认'}\` · ${policy.webSearch ? '可以上网搜索' : '只能聊天'}`, flags: MessageFlags.Ephemeral });
+        const shared = !isDM && policy.sharedSession;
+        return interaction.reply({ content: `你是访客：${usage.periodName}已用 ${usage.used}/${usage.limit} 次 · 模型 \`${policy.model || '默认'}\` · ${policy.webSearch ? '可以上网搜索' : '只能聊天'}${shared ? ' · 和主人共用这个频道的对话' : ''}`, flags: MessageFlags.Ephemeral });
       }
       if (!meta) return interaction.reply({ content: '这里还没有会话。', flags: MessageFlags.Ephemeral });
       const s = this.sessions.summary(meta);
       const lines = [
-        `**${s.title}**`, `权限：${s.tier === 'owner' ? '主人（可用工具）' : '访客（仅聊天）'} · 模式 \`${s.permissionMode}\``,
+        `**${s.title}**`, `权限：${s.tier === 'owner' ? `主人（可用工具） · 模式 \`${s.permissionMode}\`` : `访客（仅聊天${this.sessions.backendFor(meta) === 'api' ? '，API 直连' : ''}）`}`,
         `模型：\`${s.model || '默认'}\`${s.effort ? ` · effort \`${s.effort}\`` : ''}`, `工作目录：\`${s.cwd}\``,
         `轮数 ${s.stats.turns} · 累计 $${s.stats.costUsd.toFixed(4)} · ${s.busy ? '正在忙' : '空闲'}${s.queued ? `，排队 ${s.queued}` : ''}`,
       ];

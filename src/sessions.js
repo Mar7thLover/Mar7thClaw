@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { assemblePrompt, assembleInterjection } from './persona/assembler.js';
 import { runTurn as defaultRunTurn, RunnerError } from './claude/runner.js';
+import { runApiTurn as defaultRunApiTurn, apiModelId } from './claude/api-runner.js';
 import { fileRecord, stageOutgoing, MAX_OUTGOING_FILES } from './attachments.js';
 
 const PERMISSION_MODES = ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions', 'dontAsk', 'manual'];
@@ -29,7 +30,7 @@ function pickGreeting(card, random = Math.random) {
 }
 
 export class SessionManager extends EventEmitter {
-  constructor({ config, cards, dataDir, runTurn = defaultRunTurn, models = null, mcp = null, people = null }) {
+  constructor({ config, cards, dataDir, runTurn = defaultRunTurn, runApiTurn = defaultRunApiTurn, models = null, mcp = null, people = null }) {
     super();
     this.models = models;
     this.people = people;
@@ -41,6 +42,9 @@ export class SessionManager extends EventEmitter {
     this.dir = path.join(dataDir, 'sessions');
     this.tmpDir = path.join(dataDir, 'tmp');
     this.runTurn = runTurn;
+    // 访客单独的对话可以直接调 Anthropic API，对话历史存在这里（按 claudeSessionId 一个文件）。
+    this.runApiTurn = runApiTurn;
+    this.apiDir = path.join(dataDir, 'api-history');
     this.sessions = new Map();
     this.queues = new Map();
     this.running = new Map();
@@ -182,8 +186,8 @@ export class SessionManager extends EventEmitter {
     this.save(meta);
   }
 
-  mcpServersFor(meta) {
-    if (!this.mcp || meta.tier !== 'owner') return null;
+  mcpServersFor(meta, tier = meta.tier) {
+    if (!this.mcp || tier !== 'owner') return null;
     return {
       claw: {
         type: 'stdio', command: process.execPath, args: [this.mcp.script],
@@ -192,12 +196,21 @@ export class SessionManager extends EventEmitter {
     };
   }
 
+  apiHistoryFile(meta) {
+    return path.join(this.apiDir, `${meta.claudeSessionId}.json`);
+  }
+
+  dropApiHistory(meta) {
+    rmSync(this.apiHistoryFile(meta), { force: true });
+  }
+
   remove(id) {
-    this.get(id);
+    const meta = this.get(id);
     this.interrupt(id);
     this.sessions.delete(id);
     rmSync(path.join(this.dir, `${id}.json`), { force: true });
     rmSync(path.join(this.dir, `${id}.jsonl`), { force: true });
+    this.dropApiHistory(meta);
     rmSync(path.join(this.dataDir, 'uploads', id), { recursive: true, force: true });
     this.emitEvent(id, { type: 'session_removed' });
   }
@@ -207,6 +220,7 @@ export class SessionManager extends EventEmitter {
     const meta = this.get(id);
     this.interrupt(id);
     const card = this.cards.get(meta.card);
+    this.dropApiHistory(meta);
     meta.claudeSessionId = randomUUID();
     meta.started = false;
     meta.pendingGreeting = pickGreeting(card);
@@ -220,28 +234,40 @@ export class SessionManager extends EventEmitter {
     return this.transcript(id, count * 2).filter(row => row.kind === 'user' || row.kind === 'assistant').slice(-count).map(row => row.text || '');
   }
 
-  // 访客会话的模型、强度与工具以 Discord 访客策略为准，而不是会话自己的设置。
-  runtimeFor(meta) {
-    if (meta.tier !== 'guest') return { model: meta.model, effort: meta.effort, permissionMode: meta.permissionMode, guestTools: [] };
+  // 本轮按谁的权限运行：访客会话永远是访客；主人会话（包括和访客共用的频道对话）看这条消息是谁发的。
+  turnTier(meta, message) {
+    return meta.tier === 'guest' || message?.tier === 'guest' ? 'guest' : 'owner';
+  }
+
+  // 访客单独的对话可以改走 Anthropic API；共用对话的历史在 Claude Code 里，访客那一轮也只能续接它。
+  backendFor(meta, tier = meta.tier) {
+    return tier === 'guest' && meta.tier === 'guest' && this.config.discord.guest.useApi ? 'api' : 'claude';
+  }
+
+  // 访客这一轮的模型、强度与工具以 Discord 访客策略为准，而不是会话自己的设置。
+  // 走 API 时，面板里选的 CLI 别名（sonnet、opus[1m] 等）先经模型目录解析成完整的模型 ID。
+  runtimeFor(meta, tier = meta.tier, backend = this.backendFor(meta, tier)) {
+    if (tier !== 'guest') return { model: meta.model, effort: meta.effort, permissionMode: meta.permissionMode, guestTools: [] };
     const policy = this.config.discord.guest;
-    const model = policy.model || '';
-    const levels = this.models?.find(model || 'default')?.effortLevels;
+    const entry = this.models?.find(policy.model || 'default');
+    const model = backend === 'api' ? apiModelId(entry?.resolvedModel || policy.model) : policy.model || '';
+    const levels = entry?.effortLevels;
     const effort = policy.effort && (!levels || levels.includes(policy.effort)) ? policy.effort : '';
     return { model, effort, permissionMode: 'dontAsk', guestTools: policy.webSearch ? ['WebSearch'] : [] };
   }
 
-  buildPrompt(meta, message) {
+  buildPrompt(meta, message, tier = meta.tier) {
     const card = this.cards.get(meta.card);
     const scan = Math.max(1, this.config.prompt.worldInfoScanDepth);
     return assemblePrompt({
       card, prompt: this.config.prompt, userName: meta.userName, persona: meta.origin === 'panel' ? this.config.user.persona : '',
-      surface: meta.surface, tier: meta.tier, authorNote: meta.authorNote, recent: this.recentTexts(meta.id, scan),
+      surface: meta.surface, tier, sharedWithOwner: tier === 'guest' && meta.tier === 'owner', authorNote: meta.authorNote, recent: this.recentTexts(meta.id, scan),
       message: { from: message.from || meta.userName, text: message.text, via: message.via || meta.surface, time: nowText(), images: message.images?.length || 0, files: message.files || [] },
       channelHistory: message.channelHistory || '', replyTo: message.replyTo || null,
       // 面板里的主人会话也能按名字想起群里的人。
       people: message.people ?? (this.people && meta.origin === 'panel' && meta.tier === 'owner' ? this.people.activate({ text: message.text }) : ''),
       emojis: message.emojis || '', reactions: Boolean(message.reactions), stickers: message.stickers || '',
-      guestWebSearch: this.runtimeFor(meta).guestTools.includes('WebSearch'),
+      guestWebSearch: this.runtimeFor(meta, tier).guestTools.includes('WebSearch'),
       greeting: meta.started ? '' : meta.pendingGreeting ? this.expandGreeting(meta, card, meta.pendingGreeting) : '',
     });
   }
@@ -294,9 +320,10 @@ export class SessionManager extends EventEmitter {
   async execute(id, message, hooks, signal) {
     let meta = this.get(id);
     const turnId = randomUUID();
+    const tier = this.turnTier(meta, message);
     const images = (message.images || []).map(image => ({ file: image.file, mediaType: image.mediaType, width: image.width, height: image.height }));
     const files = (message.files || []).map(fileRecord);
-    this.append(id, { kind: 'user', turnId, from: message.from || meta.userName, via: message.via || meta.surface, text: message.text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) });
+    this.append(id, { kind: 'user', turnId, from: message.from || meta.userName, via: message.via || meta.surface, text: message.text, ...(tier !== meta.tier ? { tier } : {}), ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) });
     if (meta.stats.turns === 0 && meta.title === '新的委托') {
       meta.title = message.text.replace(/\s+/g, ' ').trim().slice(0, 24) || meta.title;
       this.save(meta);
@@ -316,30 +343,48 @@ export class SessionManager extends EventEmitter {
       if (event.type === 'tool_use') tools.set(event.id, { id: event.id, name: event.name, input: event.input });
       if (event.type === 'tool_result' && tools.has(event.id)) Object.assign(tools.get(event.id), { result: event.text.slice(0, 1500), isError: event.isError });
       if (event.type === 'init' && !meta.started) { meta.started = true; meta.pendingGreeting = ''; this.save(meta); }
-      if (event.type === 'model_fallback') this.append(id, { kind: 'notice', text: `${event.from || '所选模型'} 的安全防护拦下了这次回复${event.category ? `（${event.category}）` : ''}，Claude Code 已自动换用 ${event.to || '其他模型'} 重试。` });
+      if (event.type === 'model_fallback') this.append(id, { kind: 'notice', text: `${event.from || '所选模型'} 的安全防护拦下了这次回复${event.category ? `（${event.category}）` : ''}，已自动换用 ${event.to || '其他模型'} 重试。` });
       emit(event);
     };
     this.outbox.set(id, []);
-    const active = { turnId, input: null };
+    const active = { turnId, input: null, tier };
     this.active.set(id, active);
     emit({ type: 'turn_start' });
     try {
       let result;
+      meta = this.get(id);
+      const backend = this.backendFor(meta, tier);
+      // Claude Code 与 API 的对话历史互不相通：访客策略在两者之间切换后，旧的上下文接不上，开新对话。
+      const previous = meta.backend || (existsSync(this.apiHistoryFile(meta)) ? 'api' : 'claude');
+      if (meta.started && previous !== backend) {
+        this.dropApiHistory(meta);
+        meta.claudeSessionId = randomUUID();
+        meta.started = false;
+        this.append(id, { kind: 'notice', text: `访客回复改为${backend === 'api' ? '直接调用 Anthropic API' : '经由 Claude Code'}，之前的上下文接不上，已开启新对话。` });
+      }
+      if (meta.backend !== backend) {
+        meta.backend = backend;
+        this.save(meta);
+      }
       for (let attempt = 0; attempt < 2; attempt++) {
         meta = this.get(id);
-        const prompt = this.buildPrompt(meta, message);
+        const prompt = this.buildPrompt(meta, message, tier);
         emit({ type: 'prompt_info', activated: prompt.activated });
-        const runtime = this.runtimeFor(meta);
+        const runtime = this.runtimeFor(meta, tier, backend);
         try {
-          result = await this.runTurn({
+          const run = backend === 'api' ? this.runApiTurn : this.runTurn;
+          result = await run({
             claudeSessionId: meta.claudeSessionId, resume: meta.started, cwd: meta.cwd, system: prompt.system, prompt: prompt.turn,
-            model: runtime.model, effort: runtime.effort, permissionMode: runtime.permissionMode, tier: meta.tier, guestTools: runtime.guestTools,
+            model: runtime.model, effort: runtime.effort, permissionMode: runtime.permissionMode, tier, guestTools: runtime.guestTools,
             images: (message.images || []).map(image => ({ mediaType: image.mediaType, data: image.data })),
             documents: message.documents || [],
-            disallowedTools: this.config.agent.disallowedTools, name: `Mar7thClaw · ${meta.title}`, mcpServers: this.mcpServersFor(meta),
+            disallowedTools: this.config.agent.disallowedTools, name: `Mar7thClaw · ${meta.title}`, mcpServers: this.mcpServersFor(meta, tier),
           }, {
-            claudeBin: this.config.claudeBin, tmpDir: this.tmpDir, signal, onEvent,
-            canUseTool: (request, requestSignal) => this.requestPermission(id, request, requestSignal, hooks),
+            claudeBin: this.config.claudeBin, tmpDir: this.tmpDir, historyDir: this.apiDir, api: this.config.anthropic, signal, onEvent,
+            // 访客这一轮本来就没有工具；万一 CLI 仍来请求，直接拒绝，不能落到主人的审批按钮上（共用对话里会话本身是主人级）。
+            canUseTool: tier === 'guest'
+              ? async () => ({ behavior: 'deny', message: '访客不能使用工具。', by: 'policy' })
+              : (request, requestSignal) => this.requestPermission(id, request, requestSignal, hooks),
             attachInput: input => { active.input = input; },
           });
           break;
@@ -394,6 +439,8 @@ export class SessionManager extends EventEmitter {
     const meta = this.get(id);
     const active = this.active.get(id);
     if (!active?.input) return false;
+    // 访客的话不能并入主人那一轮：那一轮带着主人的工具权限。
+    if (active.tier === 'owner' && this.turnTier(meta, message) === 'guest') return false;
     if (!message?.text?.trim() && !message?.images?.length && !message?.files?.length) throw Object.assign(new Error('消息不能为空'), { status: 400 });
     const text = message.text?.trim() ? message.text : '（发来了附件）';
     const prompt = assembleInterjection({
@@ -405,7 +452,8 @@ export class SessionManager extends EventEmitter {
     if (!ok) return false;
     const images = (message.images || []).map(image => ({ file: image.file, mediaType: image.mediaType, width: image.width, height: image.height }));
     const files = (message.files || []).map(fileRecord);
-    this.append(id, { kind: 'user', turnId: active.turnId, injected: true, from: message.from || meta.userName, via: message.via || meta.surface, text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) });
+    const tier = this.turnTier(meta, message);
+    this.append(id, { kind: 'user', turnId: active.turnId, injected: true, from: message.from || meta.userName, via: message.via || meta.surface, text, ...(tier !== meta.tier ? { tier } : {}), ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) });
     return true;
   }
 

@@ -212,11 +212,18 @@
 
     <section data-panel="guest" hidden>
       <p class="hint">访客 = Discord 上不在「主人」名单里的人。他们只能聊天（可选上网搜索），不能碰这台电脑，也读不到你的记忆。</p>
+      <label class="inline-check"><input type="checkbox" id="gs-shared"> 群聊频道里访客和主人共用同一个对话</label>
+      <p class="hint">打开后，访客能接上你和她在这个频道里聊过的内容，你也能接上访客的话题。访客那一轮仍然没有工具、不加载本机配置，但能看到这段对话里之前的内容（包括她替你查看过的文件结果），所以有私密内容的频道不要打开。共用对话里访客不能用 /new 和 /stop，回复也只能经由 Claude Code。私信始终是单独的对话。</p>
+      <label class="inline-check"><input type="checkbox" id="gs-useapi"> 访客单独对话时直接调用 Anthropic API（按量计费，不占用 Claude Code 订阅额度）</label>
+      <div class="row" id="gs-api-row">
+        <label class="grow">Anthropic API Key<input type="password" id="gs-apikey" autocomplete="off" placeholder="留空则用 ANTHROPIC_API_KEY 环境变量"></label>
+        <label class="grow">API 地址（可选）<input type="text" id="gs-baseurl" placeholder="https://api.anthropic.com"></label>
+      </div>
       <div class="row">
         <label class="grow">访客使用的模型<select id="gs-model"></select></label>
         <label class="grow">强度<select id="gs-effort"></select></label>
       </div>
-      <label class="inline-check"><input type="checkbox" id="gs-websearch"> 允许访客让她上网搜索（WebSearch，唯一开放的工具）</label>
+      <label class="inline-check"><input type="checkbox" id="gs-websearch"> 允许访客让她上网搜索（唯一开放的工具；走 API 时是服务端联网搜索，每千次约 10 美元）</label>
       <div class="row">
         <label class="grow">每人可用次数<input type="number" id="gs-limit" min="0" max="100000"></label>
         <label class="grow">统计周期<select id="gs-period"><option value="day">每天</option><option value="week">每周</option><option value="month">每月</option><option value="total">总共</option></select></label>

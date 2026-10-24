@@ -26,6 +26,12 @@ export const DEFAULTS = {
     approvalTimeoutSec: 600,
     disallowedTools: ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'],
   },
+  // 访客会话直接调用 Anthropic API（discord.guest.useApi）时用的凭据。apiKey 留空则用 ANTHROPIC_API_KEY 环境变量或 ant auth login 的登录信息；
+  // 不要把 ANTHROPIC_API_KEY 设成全局环境变量，否则主人会话里的 Claude Code 也会改用它按量计费。
+  anthropic: {
+    apiKey: '',
+    baseUrl: '',
+  },
   desktop: {
     // 回复完成、定时任务完成、需要审批时是否弹 Windows 系统通知（面板内提示不受影响）。
     notifications: true,
@@ -65,6 +71,11 @@ export const DEFAULTS = {
       effort: '',
       // 访客唯一可以开放的工具；其余工具（尤其能访问内网的 WebFetch）一律不给。
       webSearch: true,
+      // 群聊频道里访客和主人共用一个对话（双方都能接上彼此的话题）；关闭时访客在每个频道有自己单独的对话。
+      // 共用时访客那一轮仍以受限参数运行 Claude Code（没有工具、不加载本机配置），只是续接同一个会话。
+      sharedSession: false,
+      // 访客单独对话（含私信）时直接调用 Anthropic API，按量计费、不占用 Claude Code 订阅；共用对话时不适用。
+      useApi: false,
       quota: { limit: 20, period: 'day' },
       // 每位用户单独的上限：{ "<用户 ID>": 次数 }，0 表示禁止。
       userLimits: {},
@@ -142,5 +153,6 @@ export function replaceUserConfigValue(keys, value, file = configFile) {
 export function publicConfig(config) {
   const copy = structuredClone(config);
   copy.discord.token = config.discord.token ? `已配置（${config.discord.token.length} 字符）` : '';
+  copy.anthropic.apiKey = config.anthropic.apiKey ? `已配置（…${config.anthropic.apiKey.slice(-4)}）` : '';
   return copy;
 }

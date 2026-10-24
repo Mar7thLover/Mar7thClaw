@@ -71,5 +71,5 @@ test('会话：安全防护拦下回复、Claude Code 换模型重试时，聊�
   const result = await sessions.send(meta.id, { text: '你好' });
   assert.equal(result.ok, true);
   const notice = sessions.transcript(meta.id).find(row => row.kind === 'notice');
-  assert.equal(notice.text, 'claude-fable-5 的安全防护拦下了这次回复（cyber），Claude Code 已自动换用 claude-opus-4-8 重试。');
+  assert.equal(notice.text, 'claude-fable-5 的安全防护拦下了这次回复（cyber），已自动换用 claude-opus-4-8 重试。');
 });

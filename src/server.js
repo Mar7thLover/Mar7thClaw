@@ -240,7 +240,7 @@ export function createServer({ config, sessions, cards, discord, models, schedul
             if (!['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(g.effort)) throw new HttpError(400, 'effort 不合法');
             guest.effort = g.effort;
           }
-          if (g.webSearch !== undefined) guest.webSearch = g.webSearch === true;
+          for (const key of ['webSearch', 'sharedSession', 'useApi']) if (g[key] !== undefined) guest[key] = g[key] === true;
           if (g.quota) {
             const limit = Number(g.quota.limit);
             if (!Number.isSafeInteger(limit) || limit < 0 || limit > 100000) throw new HttpError(400, '次数上限必须是 0 到 100000 的整数');
@@ -274,6 +274,21 @@ export function createServer({ config, sessions, cards, discord, models, schedul
             }
           }
           patch.discord.peopleMemory = memory;
+        }
+      }
+      // 访客用的 API Key：只在填了新值（或明确传 clear）时改写，面板回显的是打码后的值。
+      if (body.anthropic) {
+        const a = body.anthropic;
+        patch.anthropic = {};
+        if (a.clearApiKey === true) patch.anthropic.apiKey = '';
+        else if (typeof a.apiKey === 'string' && a.apiKey.trim()) {
+          if (!/^[!-~]{10,300}$/.test(a.apiKey.trim())) throw new HttpError(400, 'API Key 格式不对');
+          patch.anthropic.apiKey = a.apiKey.trim();
+        }
+        if (a.baseUrl !== undefined) {
+          const url = String(a.baseUrl).trim();
+          if (url && !/^https?:\/\/\S+$/.test(url)) throw new HttpError(400, 'API 地址必须是 http(s) 链接');
+          patch.anthropic.baseUrl = url;
         }
       }
       if (body.agent) {
