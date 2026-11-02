@@ -21,6 +21,53 @@ const MAX_EMOJIS = 200;
 const MAX_STICKERS = 60;
 // 插话被她接收时加在那条消息上的反应。
 const INTERJECT_REACTION = '📝';
+// 链接预览与转发消息里的图片只从 Discord 自己的域名下载（附件 CDN、链接预览代理），
+// 访客不能借此让 bot 去访问内网或任意网址（和不给访客开 WebFetch 是同一个理由）。
+const DISCORD_MEDIA_HOST = /^(?:cdn\.discordapp\.com|media\.discordapp\.net|images-ext-\d+\.discordapp\.net)$/i;
+// Discord 会在消息发出后不久才补上链接预览（MESSAGE_UPDATE）；等这么久再取一次。
+const EMBED_WAIT_MS = 1500;
+
+export function discordMediaUrl(raw) {
+  try {
+    const url = new URL(String(raw || ''));
+    return url.protocol === 'https:' && DISCORD_MEDIA_HOST.test(url.hostname) ? url.href : null;
+  } catch { return null; }
+}
+
+/**
+ * 不在 message.attachments 里、但对方看得到的图片：GIF 选择器（Tenor）和图片直链的链接预览、
+ * 推文等带图预览、转发消息里的附件，以及正文里贴的 Discord 图片链接。
+ * 访客没有 WebFetch，以前这些图她完全看不到；主人会话也只能拿到一个网址。
+ * @returns {Array<{ name: string, url: string, size?: number }>} 形状与附件相同，可以直接交给 download()
+ */
+export function linkedImages(message) {
+  const found = [];
+  const seen = new Set();
+  const add = (raw, name, size) => {
+    const url = discordMediaUrl(raw);
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    found.push({ name, url, ...(size ? { size } : {}) });
+  };
+  const fromEmbeds = (embeds, label) => {
+    for (const embed of embeds || []) {
+      const type = embed.data?.type;
+      // image / gifv 类型的预览把图放在 thumbnail 里（gifv 是 GIF 的静帧）；文章类预览的 thumbnail 多半是网站配图，不要。
+      const media = embed.image || (type === 'image' || type === 'gifv' ? embed.thumbnail : null);
+      if (media) add(media.proxyURL || media.url, label);
+    }
+  };
+  fromEmbeds(message.embeds, '链接预览里的图片');
+  for (const snapshot of message.messageSnapshots?.values?.() || []) {
+    for (const a of snapshot.attachments?.values?.() || []) if (looksLikeImage(a.name, a.contentType)) add(a.url, `转发消息中的 ${a.name}`, a.size);
+    fromEmbeds(snapshot.embeds, '转发消息里的图片');
+  }
+  for (const match of String(message.content || '').matchAll(/https:\/\/(?:cdn\.discordapp\.com|media\.discordapp\.net)\/attachments\/[^\s<>|)]+/g)) {
+    const name = path.basename(new URL(match[0]).pathname);
+    if (looksLikeImage(name)) add(match[0], name);
+  }
+  return found;
+}
 
 // Bot 能上传的单个文件大小取决于服务器加成等级；私信与未加成服务器是 10MB。
 function uploadLimit(channel) {
@@ -239,7 +286,19 @@ export class DiscordBot extends EventEmitter {
     if (attachment.size > limit) throw new Error(`超过 ${formatSize(limit)}`);
     const response = await fetch(attachment.url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return Buffer.from(await response.arrayBuffer());
+    // 链接预览没有 size，按实际下载的大小再判断一次。
+    if (Number(response.headers.get('content-length')) > limit) throw new Error(`超过 ${formatSize(limit)}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > limit) throw new Error(`超过 ${formatSize(limit)}`);
+    return buffer;
+  }
+
+  // 正文里有网址、但 Discord 还没补上链接预览时，稍等一下再取一次消息。
+  async withEmbeds(message) {
+    if (message.embeds?.length || !/https?:\/\//i.test(message.content || '') || typeof message.fetch !== 'function') return message;
+    await new Promise(resolve => setTimeout(resolve, EMBED_WAIT_MS));
+    if (message.embeds?.length) return message;
+    return message.fetch(true).catch(() => message);
   }
 
   /**
@@ -254,11 +313,16 @@ export class DiscordBot extends EventEmitter {
     const fileItems = [];
     const owner = tier === 'owner' && meta.tier === 'owner';
     const sources = [...message.attachments.values()].map(a => ({ a, fromReply: false }));
-    if (referenced) sources.push(...[...referenced.attachments.values()].map(a => ({ a, fromReply: true })));
+    sources.push(...linkedImages(message).map(a => ({ a, fromReply: false, linked: true })));
+    if (referenced) {
+      sources.push(...[...referenced.attachments.values()].map(a => ({ a, fromReply: true })));
+      sources.push(...linkedImages(referenced).map(a => ({ a, fromReply: true, linked: true })));
+    }
     const ownerDir = path.join(meta.cwd, '.claw-attachments');
-    for (const { a, fromReply } of sources) {
+    for (const { a, fromReply, linked } of sources) {
       const label = fromReply ? `被回复消息中的 ${a.name}` : a.name;
-      const isImage = looksLikeImage(a.name, a.contentType);
+      // 链接预览的地址不一定带扩展名；下载后由 sharp 判断是不是图片。
+      const isImage = linked || looksLikeImage(a.name, a.contentType);
       const kind = isImage ? 'image' : guessKind(a.name, a.contentType);
       if (!owner && kind === 'binary') { notes.push(`<附件:${label}（这类文件没办法直接读取）>`); continue; }
       if (isImage && imageItems.length >= MAX_IMAGES) { notes.push(`<图片 ${label} 超出单条消息上限，未发送>`); continue; }
@@ -269,7 +333,7 @@ export class DiscordBot extends EventEmitter {
       try { buffer = await this.download(a, limit); } catch (error) { notes.push(`<附件 ${label} 下载失败：${error.message}>`); continue; }
       if (!isImage) { fileItems.push({ name: a.name, label, buffer }); continue; }
       imageItems.push({ name: label, buffer });
-      if (owner) {
+      if (owner && !linked) {
         mkdirSync(ownerDir, { recursive: true });
         const file = path.join(ownerDir, `${message.id}-${a.name.replace(/[^\w.\u4e00-\u9fff-]/g, '_')}`);
         writeFileSync(file, buffer);
@@ -310,7 +374,9 @@ export class DiscordBot extends EventEmitter {
       } catch { /* 被引用的消息可能已删除 */ }
     }
     this.noteForeignEmojis(message.content);
-    const typingEarly = message.attachments.size || referenced?.attachments?.size ? message.channel.sendTyping().catch(() => {}) : null;
+    const hasLink = /https?:\/\//i.test(message.content || '') || message.embeds?.length || message.messageSnapshots?.size;
+    const typingEarly = message.attachments.size || referenced?.attachments?.size || hasLink ? message.channel.sendTyping().catch(() => {}) : null;
+    message = await this.withEmbeds(message);
     const tier = verdict.tier;
     const { notes, images, files, documents } = await this.processAttachments(message, meta, referenced, tier);
     await typingEarly;
